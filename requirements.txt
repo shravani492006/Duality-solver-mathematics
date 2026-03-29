@@ -3,3 +3,8 @@ numpy
 scipy
 matplotlib
 reportlab
+pandas
+pillow
+opencv-python-headless
+pytesseract
+fpdf
