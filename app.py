@@ -1044,7 +1044,8 @@ def build_pdf(primal_c, primal_A, primal_b, primal_ineq, primal_opt,
             pdf.ln(3)
 
     buffer = io.BytesIO()
-    buffer.write(bytes(pdf.output()))
+    pdf_output = pdf.output(dest='S')
+    buffer.write(pdf_output.encode('latin-1'))
     buffer.seek(0)
     return buffer
 
