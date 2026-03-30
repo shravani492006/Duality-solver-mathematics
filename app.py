@@ -461,63 +461,74 @@ def simplex_iterations(c, A, b, max_iter=50):
 # BIG-M METHOD
 # ============================================================
 def bigm_iterations(c, A, b, ineq, opt, max_iter=80):
+    """
+    Solves Linear Programming problems with >= or = constraints 
+    by introducing Artificial Variables with a high cost penalty (M).
+    """
     n_vars, n_cons = len(c), len(A)
-    M = BIG_M
+    M = 1000000  # Large penalty value (BIG_M)
+    
+    # Standardize objective: Simplex logic usually minimizes the objective row
     sign = -1.0 if opt == "Maximize" else 1.0
     c_arr = [sign * ci for ci in c]
 
+    # --- 1. VARIABLE MAPPING ---
+    # Identify how many Slack, Surplus, and Artificial variables we need
     slack_map = {}
     artif_map = {}
-    k_s = 0
-    k_a = 0
-    slack_types = []
-
+    k_s = 0  # Slack/Surplus counter
+    k_a = 0  # Artificial counter
+    
     for i, iq in enumerate(ineq):
         if iq == "<=":
-            slack_types.append(("slack", i))
             k_s += 1
         elif iq == ">=":
-            slack_types.append(("surplus", i))
             k_s += 1
             k_a += 1
-        else:
+        else: # iq == "="
             k_a += 1
 
-    n_slack_actual = sum(1 for iq in ineq if iq in ("<=", ">="))
-    n_artif_actual = sum(1 for iq in ineq if iq in (">=", "="))
+    n_slack_actual = k_s
+    n_artif_actual = k_a
     total_cols = n_vars + n_slack_actual + n_artif_actual + 1
 
+    # Generate labels for DataFrame visualization
     col_labels = ([f"x{i+1}" for i in range(n_vars)] +
                   [f"s{i+1}" for i in range(n_slack_actual)] +
                   [f"a{i+1}" for i in range(n_artif_actual)] + ["RHS"])
 
+    # --- 2. TABLEAU CONSTRUCTION ---
     tableau = np.zeros((n_cons + 1, total_cols))
     k_s2 = 0
     k_a2 = 0
 
     for i, iq in enumerate(ineq):
-        tableau[i, :n_vars] = A[i]
-        tableau[i, -1] = b[i]
+        tableau[i, :n_vars] = A[i] # Decision variable coefficients
+        tableau[i, -1] = b[i]      # Constraint constants (RHS)
+        
         if iq == "<=":
             col = n_vars + k_s2
-            tableau[i, col] = 1.0
+            tableau[i, col] = 1.0  # Add Slack variable
             slack_map[i] = col
             k_s2 += 1
         elif iq == ">=":
             col_s = n_vars + k_s2
-            tableau[i, col_s] = -1.0
+            tableau[i, col_s] = -1.0 # Add Surplus variable
             slack_map[i] = col_s
             k_s2 += 1
+            
             col_a = n_vars + n_slack_actual + k_a2
-            tableau[i, col_a] = 1.0
+            tableau[i, col_a] = 1.0  # Add Artificial variable
             artif_map[i] = col_a
             k_a2 += 1
-        else:
+        else: # iq == "="
             col_a = n_vars + n_slack_actual + k_a2
-            tableau[i, col_a] = 1.0
+            tableau[i, col_a] = 1.0  # Add Artificial variable only
             artif_map[i] = col_a
             k_a2 += 1
 
+    # --- 3. INITIAL BASIS SELECTION ---
+    # Slacks (<=) or Artificials (>=, =) start in the basis
     basis = [None] * n_cons
     for i, iq in enumerate(ineq):
         if iq == "<=":
@@ -525,53 +536,63 @@ def bigm_iterations(c, A, b, ineq, opt, max_iter=80):
         else:
             basis[i] = col_labels[artif_map[i]]
 
+    # --- 4. OBJECTIVE ROW SETUP & PENALTY ---
+    # Set initial objective row with penalties (M) for artificial variables
     for j in range(n_vars):
         tableau[-1, j] = c_arr[j]
     for ac in artif_map.values():
         tableau[-1, ac] = M
 
+    # Row operations to make artificial variable columns "clean" (0 in the Z-row)
+    # This is crucial: Z-row coefficients for basic variables must be zero.
     for row_i, iq in enumerate(ineq):
         if iq in (">=", "="):
             ac = artif_map[row_i]
             tableau[-1] -= tableau[-1, ac] * tableau[row_i]
 
+    # --- 5. PIVOTING LOOP (Standard Simplex) ---
     records = []
     for iteration in range(max_iter):
         obj_row = tableau[-1, :-1]
-        pivot_col = int(np.argmin(obj_row))
-        if obj_row[pivot_col] >= -1e-9:
+        pivot_col = int(np.argmin(obj_row)) # Entering variable
+        
+        if obj_row[pivot_col] >= -1e-9: # Optimality reached
             break
+            
         rhs = tableau[:-1, -1]
         col_val = tableau[:-1, pivot_col]
         ratios = np.where(col_val > 1e-9, rhs / col_val, np.inf)
-        pivot_row = int(np.argmin(ratios))
+        pivot_row = int(np.argmin(ratios)) # Leaving variable
+        
         if ratios[pivot_row] == np.inf:
-            break
+            break # Problem is unbounded
+            
         entering = col_labels[pivot_col]
         leaving = basis[pivot_row]
+        
+        # Gauss-Jordan Elimination
         tableau[pivot_row] /= tableau[pivot_row, pivot_col]
         for i in range(len(tableau)):
             if i != pivot_row:
                 tableau[i] -= tableau[i, pivot_col] * tableau[pivot_row]
+        
         basis[pivot_row] = entering
-        df = pd.DataFrame(
-            tableau,
-            columns=col_labels,
-            index=[f"R{i+1}" for i in range(n_cons)] + ["Z"]
-        ).round(4)
+        
+        # Log this iteration
+        df = pd.DataFrame(tableau, columns=col_labels, 
+                          index=[f"R{i+1}" for i in range(n_cons)] + ["Z"]).round(4)
         records.append({
-            "iteration": iteration + 1,
-            "entering": entering,
-            "leaving": leaving,
-            "basis": list(basis),
-            "tableau": df,
-            "method": "Big-M"
+            "iteration": iteration + 1, "entering": entering, "leaving": leaving,
+            "basis": list(basis), "tableau": df, "method": "Big-M"
         })
 
+    # --- 6. FEASIBILITY & FINAL SOLUTION ---
+    # Check if any artificial variables are still positive in the final basis
     feasible = all(
         not (bv and bv.startswith('a') and abs(tableau[i, -1]) > 1e-6)
         for i, bv in enumerate(basis)
     )
+    
     solution = [0.0] * n_vars
     for i, bv in enumerate(basis):
         if bv:
@@ -580,8 +601,11 @@ def bigm_iterations(c, A, b, ineq, opt, max_iter=80):
                 xi = int(m.group(1)) - 1
                 if xi < n_vars:
                     solution[xi] = round(tableau[i, -1], 6)
+    
+    # Adjust objective value based on the initial optimization type
     raw_obj = round(tableau[-1, -1], 6)
     obj_val = -raw_obj if opt == "Maximize" else raw_obj
+    
     return records, solution, obj_val, feasible
 
 # ============================================================
