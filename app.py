@@ -649,39 +649,58 @@ def solve_primal(c, A, b, ineq, opt):
 # DUAL SOLVER
 # ============================================================
 def solve_dual(dc, dA, db, dineq, dtype, dual_var_bounds=None):
+    
+    # Step 1: Adjust objective function based on problem type
+    # If Minimization → keep as it is (+1)
+    # If Maximization → convert to minimization (-1)
     sign_d = 1 if dtype == "Minimize" else -1
     dc_arr = [sign_d * v for v in dc]
-
-    A_ub_d, b_ub_d = [], []
-    A_eq_d, b_eq_d = [], []
-
+    
+    # Step 2: Initialize lists for inequality and equality constraints
+    A_ub_d, b_ub_d = [], []   # For <= constraints
+    A_eq_d, b_eq_d = [], []   # For = constraints
+    
+    # Step 3: Handle dimension mismatch safely
+    # Ensures we don’t go out of bounds if inputs are inconsistent
     n_constraints = min(len(dA), len(dineq), len(db))
     if len(dA) != len(dineq) or len(dA) != len(db):
         st.warning("Dual dimension mismatch detected; using safe min-size to avoid crash.")
-
+    
+    # Step 4: Convert all constraints into standard form
     for i in range(n_constraints):
         row = dA[i]
+        
         if dineq[i] == "<=":
+            # Keep <= constraints as they are
             A_ub_d.append(row)
             b_ub_d.append(db[i])
+        
         elif dineq[i] == ">=":
+            # Convert >= to <= by multiplying by -1
             A_ub_d.append([-v for v in row])
             b_ub_d.append(-db[i])
+        
         else:
+            # Equality constraint (=)
             A_eq_d.append(row)
             b_eq_d.append(db[i])
-
+    
+    # Step 5: Set bounds for dual variables
+    # Default: all variables >= 0
     bounds = dual_var_bounds if dual_var_bounds is not None else [(0, None)] * len(dc)
-
+    
+    # Step 6: Solve using scipy linprog (HiGHS method)
     res = linprog(
         dc_arr,
-        A_ub=A_ub_d or None,
+        A_ub=A_ub_d or None,   # Pass None if empty
         b_ub=b_ub_d or None,
         A_eq=A_eq_d or None,
         b_eq=b_eq_d or None,
         bounds=bounds,
         method="highs"
     )
+    
+    # Step 7: Return result object (contains solution, status, etc.)
     return res
 
 # ============================================================
