@@ -612,19 +612,37 @@ def bigm_iterations(c, A, b, ineq, opt, max_iter=80):
 # SMART SOLVER
 # ============================================================
 def solve_primal(c, A, b, ineq, opt):
+    
+    # Step 1: Normalize constraints
+    # Converts all constraints into a standard form (e.g., makes RHS positive, etc.)
     A, b, ineq = normalize_constraints(A, b, ineq)
+    
+    # Step 2: Check if Big-M method is required
+    # Big-M is needed if there are >= or = constraints
     needs_bigm = any(iq in (">=", "=") for iq in ineq)
+    
+    # Step 3: If Big-M is needed, use Big-M method
     if needs_bigm:
         records, solution, obj_val, feasible = bigm_iterations(c, A, b, ineq, opt)
+        
+        # Return results along with method used ("Big-M")
         return records, solution, obj_val, "Big-M", feasible
+    
     else:
         try:
+            # Step 4: If only <= constraints, use Simplex method
+            # Convert A and b to list format to avoid mutation issues
             records, solution, obj_val = simplex_iterations(c, [list(r) for r in A], list(b))
+            
+            # Step 5: Adjust objective value for minimization
             if opt == "Maximize":
                 return records, solution, obj_val, "Simplex", True
             else:
+                # For minimization, negate the result
                 return records, solution, -obj_val, "Simplex", True
+        
         except Exception as e:
+            # Step 6: Handle errors (infeasible/unbounded cases)
             return [], [], 0.0, "Simplex", False
 
 # ============================================================
