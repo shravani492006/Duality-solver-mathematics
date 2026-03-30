@@ -798,12 +798,21 @@ def generate_analysis(c, A, b, ineq, opt, primal_sol, primal_obj,
 # VISUALIZATION
 # ============================================================
 def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
-                  dual_sol, dual_obj, method_used):
+                 dual_sol, dual_obj, method_used):
+    """
+    Creates a dashboard of plots:
+    1. Bar chart of decision variables (Primal).
+    2. Pie chart of shadow prices (Dual distribution).
+    3. (If 2D) Geometric plot of constraints and the feasible region.
+    """
     n_vars = len(c)
-    bg_fig = SURFACE
+    # Style constants (Assumed defined elsewhere in your script)
+    bg_fig = SURFACE 
     tc = TEXT_MED
     cc = CHART_COLORS
 
+    # --- 1. FIGURE SETUP ---
+    # Create 3 subplots if it's a 2D problem (to show the geometry), else 2 subplots
     if n_vars == 2:
         fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     else:
@@ -816,28 +825,30 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
         for sp in ax.spines.values():
             sp.set_edgecolor(BORDER)
 
+    # --- 2. PRIMAL SOLUTION BAR CHART ---
     ax1 = axes[0]
     var_names = [f"x{i+1}" for i in range(n_vars)]
     bars = ax1.bar(var_names, primal_sol, color=cc[:n_vars],
-                   edgecolor='none', zorder=3, width=0.5, alpha=0.9)
+                    edgecolor='none', zorder=3, width=0.5, alpha=0.9)
+    
+    # Label each bar with its optimal value
     for bar, val in zip(bars, primal_sol):
         ax1.text(bar.get_x() + bar.get_width() / 2,
                  bar.get_height() + max(primal_sol) * 0.02 if max(primal_sol) > 0 else 0.1,
                  f'{val:.3f}', ha='center', va='bottom',
                  color=tc, fontsize=9, fontweight='bold')
-    ax1.set_title("Primal Solution (x variables)", color=tc, fontsize=11,
-                  fontweight='bold', pad=12)
-    ax1.set_xlabel("Variable", color=tc, fontsize=9)
-    ax1.set_ylabel("Value", color=tc, fontsize=9)
+    
+    ax1.set_title("Primal Solution (x variables)", color=tc, fontsize=11, fontweight='bold', pad=12)
     ax1.yaxis.grid(True, color=BORDER, linestyle='--', alpha=0.5, zorder=0)
-    ax1.set_axisbelow(True)
-    ax1.axhline(0, color=BORDER, linewidth=0.8)
 
+    # --- 3. DUAL VARIABLE DISTRIBUTION (PIE CHART) ---
+    # Dual variables (Shadow Prices) show how much the objective would change 
+    # if a constraint's RHS was increased by 1 unit.
     ax2 = axes[1]
     vals = np.array(dual_sol)
     if vals.sum() > 1e-9:
         wedges, texts, autotexts = ax2.pie(
-            np.abs(vals) + 1e-9,
+            np.abs(vals) + 1e-9, # Small epsilon to prevent zero-size wedges
             labels=[f"y{i+1}={v:.3f}" for i, v in enumerate(dual_sol)],
             colors=cc[:len(dual_sol)],
             autopct="%1.1f%%",
@@ -851,36 +862,37 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
     else:
         ax2.text(0.5, 0.5, "All dual\nvariables = 0",
                  ha='center', va='center', color=tc, fontsize=11)
-    ax2.set_title("Dual Variable Distribution (Shadow Prices)", color=tc,
-                  fontsize=11, fontweight='bold', pad=12)
+    ax2.set_title("Dual Variable Distribution (Shadow Prices)", color=tc, fontsize=11, fontweight='bold', pad=12)
 
+    # --- 4. 2D FEASIBLE REGION PLOT ---
     if n_vars == 2:
         ax3 = axes[2]
-        ax3.set_facecolor(bg_fig)
-        ax3.tick_params(colors=tc, labelsize=9)
-        for sp in ax3.spines.values():
-            sp.set_edgecolor(BORDER)
-
         max_b = max(b) if b else 10
-        x_max = max_b * 1.5
+        x_max = max_b * 1.5 # Set axis limits based on RHS values
         x = np.linspace(0, x_max, 400)
         constraint_colors = [ACCENT3, WARN, ACCENT2, ACCENT, "#FBBF24", "#FB923C"]
 
+        # Plot individual constraint lines
         for i, (row, rhs, sign) in enumerate(zip(A, b, ineq)):
             a1, a2 = row[0], row[1]
             col = constraint_colors[i % len(constraint_colors)]
             label = f"C{i+1}: {a1}x1 + {a2}x2 {sign} {rhs}"
+            
+            # Handle standard slope-intercept lines
             if abs(a2) > 1e-9:
                 y = (rhs - a1 * x) / a2
                 mask = (y >= -x_max * 0.1) & (y <= x_max * 1.5)
                 ax3.plot(x[mask], y[mask], color=col, linewidth=2, label=label, alpha=0.9)
+            # Handle vertical lines (where a2 is zero)
             elif abs(a1) > 1e-9:
                 xv = rhs / a1
                 ax3.axvline(xv, color=col, linewidth=2, label=label, alpha=0.9)
 
+        # --- 5. FEASIBLE REGION SHADING (CONVEX HULL) ---
         try:
             from scipy.spatial import ConvexHull
             pts = []
+            # Grid search to find all points (x,y) that satisfy ALL constraints
             test_x = np.linspace(0, x_max, 60)
             test_y = np.linspace(0, x_max, 60)
             for xi in test_x:
@@ -888,14 +900,13 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
                     ok = True
                     for i, (row, rhs, sign) in enumerate(zip(A, b, ineq)):
                         val = row[0]*xi + row[1]*yi
-                        if sign == "<=" and val > rhs + 1e-6:
-                            ok = False; break
-                        elif sign == ">=" and val < rhs - 1e-6:
-                            ok = False; break
-                        elif sign == "=" and abs(val - rhs) > 1e-4:
-                            ok = False; break
+                        if sign == "<=" and val > rhs + 1e-6: ok = False; break
+                        elif sign == ">=" and val < rhs - 1e-6: ok = False; break
+                        elif sign == "=" and abs(val - rhs) > 1e-4: ok = False; break
                     if ok:
                         pts.append(np.array([xi, yi]))
+            
+            # If we found feasible points, draw the shaded polygon (the Convex Hull)
             if len(pts) >= 3:
                 pts_arr = np.array(pts)
                 hull = ConvexHull(pts_arr)
@@ -904,11 +915,14 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
                                linewidth=1.5, linestyle='--', alpha=0.7)
                 ax3.add_patch(poly)
         except Exception:
-            pass
+            pass # Skip shading if ConvexHull fails or scipy is missing
 
+        # --- 6. PLOT OPTIMAL POINT ---
         ox, oy = primal_sol[0], primal_sol[1]
         ax3.scatter([ox], [oy], color=ACCENT, s=180, zorder=10,
                     edgecolors='white', linewidth=2, label=f"Optimal ({ox:.2f}, {oy:.2f})")
+        
+        # Annotate the optimal objective value (Z*)
         ax3.annotate(f"Z*={round(primal_obj,2)}",
                      xy=(ox, oy), xytext=(ox + x_max*0.05, oy + x_max*0.05),
                      color=ACCENT, fontsize=9, fontweight='bold',
@@ -916,19 +930,11 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
 
         ax3.set_xlim(-x_max * 0.05, x_max)
         ax3.set_ylim(-x_max * 0.05, x_max)
-        ax3.set_xlabel("x1", color=tc, fontsize=10)
-        ax3.set_ylabel("x2", color=tc, fontsize=10)
-        ax3.set_title("Feasible Region & Optimal Point", color=tc,
-                      fontsize=11, fontweight='bold', pad=12)
-        ax3.legend(fontsize=7, framealpha=0.3, facecolor=SURFACE2,
-                   edgecolor=BORDER, labelcolor=tc, loc='upper right')
-        ax3.yaxis.grid(True, color=BORDER, linestyle='--', alpha=0.3)
-        ax3.xaxis.grid(True, color=BORDER, linestyle='--', alpha=0.3)
-        ax3.set_axisbelow(True)
+        ax3.set_title("Feasible Region & Optimal Point", color=tc, fontsize=11, fontweight='bold', pad=12)
+        ax3.legend(fontsize=7, framealpha=0.3, facecolor=SURFACE2, edgecolor=BORDER, loc='upper right')
 
     plt.tight_layout(pad=2.5)
     return fig
-
 # ============================================================
 # PDF BUILDER
 # ============================================================
