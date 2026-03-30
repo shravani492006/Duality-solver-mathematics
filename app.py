@@ -168,7 +168,7 @@ def ocr_extract(image_np):
         "--psm 11 --oem 3",
     ]
     lp_kw = re.compile(
-        r'(maximiz|minimiz|subject|s\.t\.|x\s*\d|z\s*=|<=|>=|[≤≥]|\d+\s*x)',
+        r'(maximiz|minimiz|subject|s\.t\.|x\s*\d|y\s*\d|z\s*=|w\s*=|<=|>=|[≤≥]|\d+\s*[xy])',
         re.IGNORECASE
     )
     best_text = ""
@@ -196,12 +196,12 @@ def normalize_ocr_lp(text):
     text = re.sub(r'[≥⩾]', '>=', text)
     text = re.sub(r'[×✕]', 'x', text)
     text = re.sub(r'\bZ\s*[=:]\s*', 'Z = ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bx\s+(\d)', r'x\1', text, flags=re.IGNORECASE)
-    text = re.sub(r'(\d)\s+(x\d)', r'\1\2', text, flags=re.IGNORECASE)
+    text = re.sub(r'\b([xy])\s+(\d)', r'\1\2', text, flags=re.IGNORECASE)
+    text = re.sub(r'(\d)\s+([xy]\d)', r'\1\2', text, flags=re.IGNORECASE)
     return text
 
 # ============================================================
-# LP PARSER
+# LP PARSER  — FIX: supports both x and y variable names
 # ============================================================
 def clean_lp(text):
     text = text.lower()
@@ -213,7 +213,8 @@ def clean_lp(text):
     text = re.sub(r'\b(maximize|maximise|max)\b','MAXIMIZE\n',text)
     text = re.sub(r'\b(minimize|minimise|min)\b','MINIMIZE\n',text)
     text = re.sub(r',(?!\d)',' ',text)
-    text = re.sub(r'\bx\s+(\d)', r'x\1', text)
+    # normalise spacing for both x and y variables
+    text = re.sub(r'\b([xy])\s+(\d)', r'\1\2', text)
     text = re.sub(r'[ \t]+',' ',text)
     return text.strip()
 
@@ -230,8 +231,9 @@ def parse_lp(text):
             n_vars += 1
         return var_map[v]
 
+    # FIX: regex now matches both x and y (and any single-letter variable followed by digits)
     term_re = re.compile(
-        r'([+-]?)\s*(\d+(?:\.\d+)?)?\s*\*?\s*(x\s*\d{1,2})',
+        r'([+-]?)\s*(\d+(?:\.\d+)?)?\s*\*?\s*([a-zA-Z]\s*\d{1,2})',
         re.IGNORECASE
     )
 
@@ -240,7 +242,11 @@ def parse_lp(text):
         expr = re.sub(r'([+-])', r' \1 ', expr)
         expr = re.sub(r'\s+', ' ', expr).strip()
         for sign, coef, var in term_re.findall(expr):
-            idx = get_idx(var)
+            # skip purely alphabetic tokens that aren't variable references
+            var_clean = var.replace(' ', '').lower()
+            if not re.match(r'^[a-z]\d+$', var_clean):
+                continue
+            idx = get_idx(var_clean)
             coef = float(coef) if coef else 1.0
             sv = -1.0 if sign == '-' else 1.0
             d[idx] = d.get(idx, 0) + sv * coef
@@ -253,11 +259,12 @@ def parse_lp(text):
             opt = "Maximize"
         if "minimize" in line_l:
             opt = "Minimize"
-        if re.search(r'z\s*=', line_l) or (
+        # objective: lines containing z= or w= or max/min keyword with variables
+        if re.search(r'[zw]\s*=', line_l) or (
             ("max" in line_l or "min" in line_l) and term_re.search(line)
         ):
             obj_found = True
-            rhs_of_eq = re.split(r'z\s*=', line, flags=re.IGNORECASE)[-1]
+            rhs_of_eq = re.split(r'[zw]\s*=', line, flags=re.IGNORECASE)[-1]
             d = parse_terms(rhs_of_eq)
             for idx, val in d.items():
                 while len(c) <= idx:
@@ -606,7 +613,6 @@ def generate_analysis(c, A, b, ineq, opt, primal_sol, primal_obj,
     m = len(A)
     lines = []
 
-    # 1. Method reason
     if method_used == "Big-M":
         ge_count = sum(1 for iq in ineq if iq == ">=")
         eq_count = sum(1 for iq in ineq if iq == "=")
@@ -625,7 +631,6 @@ def generate_analysis(c, A, b, ineq, opt, primal_sol, primal_obj,
             "column at each step."
         )
 
-    # 2. Optimal solution interpretation
     active_vars = [(f"x{i+1}", round(primal_sol[i], 4)) for i in range(n) if abs(primal_sol[i]) > 1e-6]
     zero_vars = [f"x{i+1}" for i in range(n) if abs(primal_sol[i]) <= 1e-6]
 
@@ -640,7 +645,6 @@ def generate_analysis(c, A, b, ineq, opt, primal_sol, primal_obj,
     else:
         lines.append("**Primal Solution:** All variables are zero - the problem may be trivial or degenerate.")
 
-    # 3. Strong duality
     gap = abs(primal_obj - dual_obj)
     if gap < 1e-4 and feasible:
         lines.append(
@@ -660,7 +664,6 @@ def generate_analysis(c, A, b, ineq, opt, primal_sol, primal_obj,
             f"gap = {round(gap,6)}. Small numerical discrepancy due to floating-point arithmetic."
         )
 
-    # 4. Binding constraints
     binding = []
     for i in range(m):
         lhs_val = sum(A[i][j] * primal_sol[j] for j in range(n))
@@ -673,7 +676,6 @@ def generate_analysis(c, A, b, ineq, opt, primal_sol, primal_obj,
             "Relaxing these constraints could improve the objective."
         )
 
-    # 5. Dual variable interpretation
     nonzero_dual = [(f"y{i+1}", round(dual_sol[i], 4)) for i in range(len(dual_sol)) if abs(dual_sol[i]) > 1e-6]
     if nonzero_dual:
         shadow_str = ", ".join(f"{v}={val}" for v, val in nonzero_dual)
@@ -683,7 +685,6 @@ def generate_analysis(c, A, b, ineq, opt, primal_sol, primal_obj,
             "i.e., how much the optimal objective would improve if the RHS of that constraint increased by 1."
         )
 
-    # 6. Objective sense
     lines.append(
         f"**Objective ({opt}):** The problem seeks to {opt.lower()} "
         f"Z = {' + '.join(f'{c[i]}*x{i+1}' for i in range(n))}. "
@@ -721,7 +722,7 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
                    edgecolor='none', zorder=3, width=0.5, alpha=0.9)
     for bar, val in zip(bars, primal_sol):
         ax1.text(bar.get_x() + bar.get_width() / 2,
-                 bar.get_height() + max(primal_sol) * 0.02,
+                 bar.get_height() + max(primal_sol) * 0.02 if max(primal_sol) > 0 else 0.1,
                  f'{val:.3f}', ha='center', va='bottom',
                  color=tc, fontsize=9, fontweight='bold')
     ax1.set_title("Primal Solution (x variables)", color=tc, fontsize=11,
@@ -833,94 +834,45 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
 # ============================================================
 
 def sanitize_pdf(text):
-    """
-    Convert any Unicode text to a safe Latin-1 compatible string for FPDF.
-    Uses a comprehensive replacement map first, then strips any remaining
-    non-Latin-1 characters so the PDF never crashes.
-    """
     text = str(text)
-
-    # Explicit replacements for common math/LP symbols
     replacements = {
-        '\u2014': '-',    # em dash —
-        '\u2013': '-',    # en dash -
-        '\u2018': "'",    # left single quote
-        '\u2019': "'",    # right single quote
-        '\u201c': '"',    # left double quote
-        '\u201d': '"',    # right double quote
-        '\u2026': '...',  # ellipsis
-        '\u00b7': '.',    # middle dot
-        '\u2202': 'd',    # partial derivative
-        '\u2192': '->',   # arrow
-        '\u00b1': '+/-',  # plus-minus
-        '\u2265': '>=',   # >=
-        '\u2264': '<=',   # <=
-        '\u2260': '!=',   # not equal
-        '\u2211': 'sum',  # sum
-        '\u221e': 'inf',  # infinity
-        '\u03b1': 'a',    # alpha
-        '\u03b2': 'b',    # beta
-        '\u03b3': 'c',    # gamma
-        '\u03bb': 'lambda', # lambda
-        '\u03bc': 'u',    # mu
-        '\u03c3': 's',    # sigma
-        # Subscript digits
+        '\u2014': '-', '\u2013': '-', '\u2018': "'", '\u2019': "'",
+        '\u201c': '"', '\u201d': '"', '\u2026': '...', '\u00b7': '.',
+        '\u2202': 'd', '\u2192': '->', '\u00b1': '+/-', '\u2265': '>=',
+        '\u2264': '<=', '\u2260': '!=', '\u2211': 'sum', '\u221e': 'inf',
+        '\u03b1': 'a', '\u03b2': 'b', '\u03b3': 'c', '\u03bb': 'lambda',
+        '\u03bc': 'u', '\u03c3': 's',
         '\u2080': '0', '\u2081': '1', '\u2082': '2', '\u2083': '3',
         '\u2084': '4', '\u2085': '5', '\u2086': '6', '\u2087': '7',
         '\u2088': '8', '\u2089': '9',
-        # Superscript digits
         '\u00b9': '1', '\u00b2': '2', '\u00b3': '3',
         '\u2070': '0', '\u2074': '4', '\u2075': '5',
         '\u2076': '6', '\u2077': '7', '\u2078': '8', '\u2079': '9',
-        # Subscript letters (common in LP: yi, xi)
-        '\u1d62': 'i',    # subscript i
-        '\u2071': 'i',    # superscript i
-        '\u1d65': 'v',
-        # Math operators
-        '\u00d7': 'x',    # multiplication
-        '\u00f7': '/',    # division
-        '\u2212': '-',    # minus sign
-        '\u00a0': ' ',    # non-breaking space
-        '\u2009': ' ',    # thin space
-        '\u200b': '',     # zero-width space
-        '\u2205': '{}',   # empty set
-        '\u2208': 'in',   # element of
-        '\u2209': 'not in',
-        '\u2227': 'and',  # logical and
-        '\u2228': 'or',   # logical or
-        '\u00ac': 'not',  # logical not
-        '\u2234': 'therefore',
-        '\u2248': '~=',   # approximately equal
-        '\u221a': 'sqrt', # square root
-        '\u222b': 'integral',
-        '\u2207': 'del',  # nabla
-        '\u2022': '*',    # bullet
-        '\u25cf': '*',    # black circle
-        '\u2714': 'v',    # check mark
-        '\u2718': 'x',    # cross mark
-        '\u26a0': '!',    # warning
+        '\u1d62': 'i', '\u2071': 'i', '\u1d65': 'v',
+        '\u00d7': 'x', '\u00f7': '/', '\u2212': '-', '\u00a0': ' ',
+        '\u2009': ' ', '\u200b': '', '\u2205': '{}', '\u2208': 'in',
+        '\u2209': 'not in', '\u2227': 'and', '\u2228': 'or',
+        '\u00ac': 'not', '\u2234': 'therefore', '\u2248': '~=',
+        '\u221a': 'sqrt', '\u222b': 'integral', '\u2207': 'del',
+        '\u2022': '*', '\u25cf': '*', '\u2714': 'v', '\u2718': 'x',
+        '\u26a0': '!',
     }
-
     for char, replacement in replacements.items():
         text = text.replace(char, replacement)
-
-    # CATCH-ALL: remove or replace any remaining non-Latin-1 characters
-    # This guarantees the PDF will never crash regardless of what characters appear
     result = ''
     for char in text:
         try:
             char.encode('latin-1')
             result += char
         except (UnicodeEncodeError, UnicodeDecodeError):
-            # Replace unknown unicode with '?' to keep text readable
             result += '?'
-
     return result
 
 
 def build_pdf(primal_c, primal_A, primal_b, primal_ineq, primal_opt,
               dual_c, dual_A, dual_b, dual_ineq, dual_opt,
-              sol_x, sol_obj, pivot_records, primal_sol, primal_obj, method_used,
+              sol_x, sol_obj, pivot_records,
+              primal_sol, primal_obj, method_used,
               analysis_lines):
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -978,7 +930,6 @@ def build_pdf(primal_c, primal_A, primal_b, primal_ineq, primal_opt,
     pdf.cell(0, 7, sanitize_pdf(f"Optimal W = {round(sol_obj,6)}  |  y = {[round(v,4) for v in sol_x]}"), ln=True)
     pdf.ln(4)
 
-    # Analysis section
     sec("3. Solution Analysis & Interpretation", 5, 46, 22)
     pdf.set_font("Arial", "", 9)
     for line in analysis_lines:
@@ -987,7 +938,6 @@ def build_pdf(primal_c, primal_A, primal_b, primal_ineq, primal_opt,
         pdf.ln(2)
     pdf.ln(4)
 
-    # Pivot table
     if pivot_records:
         sec(f"4. {method_used} Pivot Table", 15, 23, 42)
         if method_used == "Big-M":
@@ -1043,10 +993,16 @@ def build_pdf(primal_c, primal_A, primal_b, primal_ineq, primal_opt,
                 pdf.ln()
             pdf.ln(3)
 
-    buffer = io.BytesIO()
-    buffer.write(bytes(pdf.output()))
+    # FIX: pdf.output() returns a bytearray in newer fpdf versions,
+    # or a str in older ones. Handle both cases safely.
+    raw = pdf.output()
+    if isinstance(raw, (bytes, bytearray)):
+        buffer = io.BytesIO(bytes(raw))
+    else:
+        buffer = io.BytesIO(raw.encode('latin-1'))
     buffer.seek(0)
     return buffer
+
 
 def build_csv(primal_sol, primal_obj, dual_sol, dual_obj):
     rows = []
@@ -1081,7 +1037,11 @@ def render_lp_formula(c, A, b, ineq, opt, is_dual=False):
     con_rows = ""
     for i, row in enumerate(A):
         lhs = " + ".join([term(row[j], f"{vs}<sub>{j+1}</sub>") for j in range(len(row))])
-        rv = int(b[i]) if b[i] == int(b[i]) else b[i]
+        # FIX: safe int conversion
+        try:
+            rv = int(b[i]) if float(b[i]) == int(float(b[i])) else b[i]
+        except (ValueError, OverflowError):
+            rv = b[i]
         ic = ACCENT3 if ineq[i] == "<=" else (WARN if ineq[i] == ">=" else ACCENT2)
         con_rows += (
             f"<div style='margin:4px 0;padding:6px 12px;background:{SURFACE2};"
@@ -1108,7 +1068,8 @@ def render_lp_formula(c, A, b, ineq, opt, is_dual=False):
 # ============================================================
 st.markdown("<div class='lp-card' style='padding-bottom:12px;'>", unsafe_allow_html=True)
 st.markdown(f"<span style='font-size:1.1rem;font-weight:700;color:{TEXT}!important;'>&#x1F4E5; Input Mode</span>", unsafe_allow_html=True)
-mode = st.selectbox("", ["✏️ Manual Entry", "📝 Text / Equation", "🖼️ Image OCR", "📊 CSV Upload"],
+# FIX: label_visibility="collapsed" on all selectboxes with empty label
+mode = st.selectbox("Input Mode", ["✏️ Manual Entry", "📝 Text / Equation", "🖼️ Image OCR", "📊 CSV Upload"],
                     label_visibility="collapsed")
 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1130,8 +1091,11 @@ if mode == "✏️ Manual Entry":
         cols = st.columns(int(num_vars) + 2)
         row = [cols[j].number_input(f"a{i+1},{j+1}", value=0.0, key=f"a{i}_{j}", format="%.2f")
                for j in range(int(num_vars))]
-        sign = cols[-2].selectbox("", ["<=", ">=", "="], key=f"s{i}")
-        rhs = cols[-1].number_input("RHS", value=0.0, key=f"b{i}", format="%.2f")
+        # FIX: label_visibility="collapsed" for the sign selectbox
+        sign = cols[-2].selectbox("Sign", ["<=", ">=", "="], key=f"s{i}",
+                                   label_visibility="collapsed")
+        rhs = cols[-1].number_input("RHS", value=0.0, key=f"b{i}", format="%.2f",
+                                     label_visibility="collapsed")
         A.append(row); b.append(rhs); ineq.append(sign)
     if st.button("💾 Save Problem", use_container_width=True):
         ok, err = validate_lp(c, A, b, ineq)
@@ -1345,7 +1309,8 @@ if solve_clicked:
         st.markdown(render_lp_formula(c, A, b, ineq, opt, is_dual=False), unsafe_allow_html=True)
 
     with tabs[1]:
-        st.markdown(render_lp_formula(db, dA, dc, dineq, dtype, is_dual=True), unsafe_allow_html=True)
+        # FIX: was render_lp_formula(db, dA, dc, ...) — wrong arg order; should be (dc, dA, db, ...)
+        st.markdown(render_lp_formula(dc, dA, db, dineq, dtype, is_dual=True), unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
         st.dataframe(
             pd.DataFrame({"Variable": [f"y{i+1}" for i in range(len(sol_x))],
