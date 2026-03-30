@@ -27,15 +27,9 @@ elif platform.system() == "Windows":
             pytesseract.pytesseract.tesseract_cmd = _p
             break
 
-# ============================================================
-# PAGE CONFIG
-# ============================================================
 st.set_page_config(page_title="Duality LP Solver", layout="wide",
                    initial_sidebar_state="expanded")
 
-# ============================================================
-# THEME
-# ============================================================
 if "theme" not in st.session_state:
     st.session_state.theme = "Dark"
 theme = st.sidebar.radio("Theme", ["Light", "Dark"],
@@ -96,7 +90,6 @@ hr{{border-color:{BORDER}!important;}}
 ::-webkit-scrollbar-thumb{{background:{BORDER};border-radius:3px;}}
 </style>""", unsafe_allow_html=True)
 
-# ── Header ──────────────────────────────────────────────────
 st.markdown(f"""
 <div style="background:linear-gradient(135deg,{SURFACE} 0%,{SURFACE2} 100%);border:1px solid {BORDER};
 border-radius:20px;padding:32px 36px 28px;margin-bottom:28px;position:relative;overflow:hidden;">
@@ -122,39 +115,44 @@ with st.sidebar:
 BIG_M = 1e4
 
 # ============================================================
-# ── UNICODE NORMALISER  (THE CORE FIX) ──────────────────────
+# UNICODE NORMALISER  ← THE KEY FIX FOR SUBSCRIPT VARIABLES
 # ============================================================
-# Maps every subscript/superscript digit and common math symbol
-# to plain ASCII so the regex parser always sees "x1", "x2", etc.
 _UNICODE_MAP = {
-    # Subscript digits  ₀₁₂₃₄₅₆₇₈₉
+    # Subscript digits  ₀₁₂₃₄₅₆₇₈₉  (these appear when users paste from Word/PDF)
     '\u2080':'0','\u2081':'1','\u2082':'2','\u2083':'3','\u2084':'4',
     '\u2085':'5','\u2086':'6','\u2087':'7','\u2088':'8','\u2089':'9',
     # Superscript digits
     '\u00b9':'1','\u00b2':'2','\u00b3':'3',
     '\u2070':'0','\u2074':'4','\u2075':'5','\u2076':'6',
     '\u2077':'7','\u2078':'8','\u2079':'9',
-    # Math operators / arrows
-    '\u2212':'-',   # minus sign
-    '\u00d7':'*',   # ×
-    '\u00f7':'/',   # ÷
+    # Math inequality symbols  ← FIXES ≤ and ≥ not being recognized
     '\u2264':'<=',  # ≤
     '\u2265':'>=',  # ≥
+    '\u2266':'<=',
+    '\u2267':'>=',
+    '\u2272':'<=',
+    '\u2273':'>=',
+    '\u226a':'<<',
+    '\u226b':'>>',
+    # Math operators
+    '\u2212':'-',   # minus sign (different from hyphen!)
+    '\u00d7':'*',   # ×
+    '\u00f7':'/',   # ÷
     '\u2260':'!=',
     '\u00b1':'+',
     '\u2192':'->',
     '\u221e':'inf',
     '\u2248':'~=',
-    '\u00a0':' ',   # non-breaking space
+    '\u00a0':' ',   # non-breaking space  ← VERY COMMON CAUSE OF PARSE FAILURES
     '\u2009':' ',   # thin space
     '\u200b':'',    # zero-width space
-    # Bullets / misc
-    '\u2022':'',
-    '\u25cf':'',
-    '\u2714':'',
-    '\u2718':'',
-    # Greek (sometimes OCR'd)
-    '\u03b1':'a','\u03b2':'b','\u03b3':'c','\u03bb':'lambda','\u03bc':'u','\u03c3':'s',
+    '\u200c':'',    # zero-width non-joiner
+    '\u200d':'',    # zero-width joiner
+    '\u2022':'',    # bullet
+    '\u25cf':'',    # black circle
+    # Greek
+    '\u03b1':'a','\u03b2':'b','\u03b3':'c',
+    '\u03bb':'lambda','\u03bc':'u','\u03c3':'s',
 }
 
 def normalize_unicode(text: str) -> str:
@@ -162,6 +160,20 @@ def normalize_unicode(text: str) -> str:
     for char, repl in _UNICODE_MAP.items():
         text = text.replace(char, repl)
     return text
+
+# ============================================================
+# PDF SANITISER
+# ============================================================
+def _s(text):
+    """Sanitize any text for FPDF (latin-1 safe). Catches ALL unicode."""
+    text = str(text)
+    text = normalize_unicode(text)
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    result = ''
+    for ch in text:
+        try:    ch.encode('latin-1'); result += ch
+        except: result += '?'
+    return result
 
 # ============================================================
 # OCR
@@ -175,13 +187,12 @@ def get_tesseract_available():
         return False
 
 def preprocess_for_ocr(image_np):
-    gray  = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    gray     = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     denoised = cv2.fastNlMeansDenoising(gray, h=10)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    clahe    = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
     enhanced = clahe.apply(denoised)
-    _, thresh = cv2.threshold(enhanced, 0, 255,
-                              cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    coords = np.column_stack(np.where(thresh > 128))
+    _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    coords   = np.column_stack(np.where(thresh > 128))
     if len(coords) > 100:
         angle = cv2.minAreaRect(coords)[-1]
         angle = -(90+angle) if angle < -45 else -angle
@@ -191,10 +202,8 @@ def preprocess_for_ocr(image_np):
             enhanced = cv2.warpAffine(enhanced, M, (w, h),
                                       flags=cv2.INTER_CUBIC,
                                       borderMode=cv2.BORDER_REPLICATE)
-    _, binary = cv2.threshold(enhanced, 0, 255,
-                              cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    large = cv2.resize(binary, None, fx=3.0, fy=3.0,
-                       interpolation=cv2.INTER_CUBIC)
+    _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    large = cv2.resize(binary, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
     kernel = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]])
     return cv2.filter2D(large, -1, kernel)
 
@@ -209,7 +218,7 @@ def ocr_extract(image_np):
     best_text, best_score, results_all = "", -1, {}
     for cfg in configs:
         try:
-            text = pytesseract.image_to_string(pil_img, config=cfg)
+            text  = pytesseract.image_to_string(pil_img, config=cfg)
             score = len(lp_kw.findall(text))
             results_all[cfg] = text
             if score > best_score:
@@ -219,74 +228,65 @@ def ocr_extract(image_np):
     return best_text or results_all.get(configs[0], ""), results_all
 
 # ============================================================
-# ── LP CLEANER  (fixed + unicode-aware) ─────────────────────
+# LP CLEANER  ← FIXED: handles subscripts, ≤/≥, and "Minimize Z=..."
 # ============================================================
 def clean_lp(text: str) -> str:
-    # 1. Normalise all unicode → ASCII first
+    # Step 1: Normalise ALL unicode first (subscripts, ≤, ≥, minus signs, spaces)
     text = normalize_unicode(text)
 
-    # 2. Standard symbol replacements
-    text = text.replace("≤","<=").replace("≥",">=")
-    text = text.replace("×","*").replace("✕","*")
+    # Step 2: Remaining symbol aliases
+    text = text.replace('≤', '<=').replace('≥', '>=')
+    text = text.replace('×', '*').replace('✕', '*')
 
-    # 3. OCR digit confusions
-    text = re.sub(r'(?<![a-zA-Z])O(?=\d)', '0', text)   # O before digit
-    text = re.sub(r'(?<=\d)l(?!\d)',        '1', text)   # digit-l
+    # Step 3: OCR digit confusions
+    text = re.sub(r'(?<![a-zA-Z])O(?=\d)', '0', text)
+    text = re.sub(r'(?<=\d)l(?!\d)',        '1', text)
 
-    # 4. Keyword markers
-    text = re.sub(r'\b(subject\s*to|s\.t\.)\b', '\nST\n', text, flags=re.IGNORECASE)
+    # Step 4: Keyword markers — must come BEFORE collapsing spaces
+    text = re.sub(r'\b(subject\s*to|s\.t\.)\b', '\nST\n',       text, flags=re.IGNORECASE)
     text = re.sub(r'\b(maximize|maximise|max)\b', '\nMAXIMIZE\n', text, flags=re.IGNORECASE)
     text = re.sub(r'\b(minimize|minimise|min)\b', '\nMINIMIZE\n', text, flags=re.IGNORECASE)
 
-    # 5. Remove commas used as list separators (but keep decimal commas carefully)
-    text = re.sub(r',\s*(?=[a-zA-Z])', ' ', text)   # "x1, x2" → "x1  x2"
-    text = re.sub(r',\s*(?=\d)', ' ', text)          # trailing commas before digits
+    # Step 5: Remove commas that are list separators
+    text = re.sub(r',\s*(?=[a-zA-Z])', ' ', text)
+    text = re.sub(r',\s*(?=\d)',        ' ', text)
 
-    # 6. Collapse spaces inside variable tokens:  "x 1" → "x1",  "x  2" → "x2"
+    # Step 6: Collapse spaces inside variable tokens: "x 1" → "x1", "x  2" → "x2"
     text = re.sub(r'\bx\s+(\d{1,2})\b', r'x\1', text, flags=re.IGNORECASE)
 
-    # 7. Attach coefficient to variable:  "2 x1" → "2x1"
+    # Step 7: Attach coefficient to variable: "2 x1" → "2x1"
     text = re.sub(r'(\d)\s+(x\d{1,2})\b', r'\1\2', text, flags=re.IGNORECASE)
 
-    # 8. Collapse whitespace
+    # Step 8: Collapse whitespace
     text = re.sub(r'[ \t]+', ' ', text)
+
     return text.strip()
 
-
 # ============================================================
-# ── LP PARSER  (robust) ──────────────────────────────────────
+# LP PARSER  ← FIXED: correct handling of "Z = 3x1 + 5x2" without Maximize/Minimize keyword on same line
 # ============================================================
-# Matches:  [sign] [coef] [*] x<digits>
-# e.g.  3x1  -2x2  +x3  x1  -x2  3*x1  + 3 x1
 _TERM_RE = re.compile(
     r'([+-]?)\s*(\d+(?:\.\d+)?)?\s*\*?\s*x(\d{1,2})',
     re.IGNORECASE
 )
 
 def _parse_expr(expr: str) -> dict:
-    """Return {var_index (0-based): coefficient} for an expression string."""
-    # space around signs so tokeniser works cleanly
+    """Return {0-based var index: coefficient}."""
     expr = re.sub(r'([+-])', r' \1 ', expr)
     expr = re.sub(r'\s+', ' ', expr).strip()
     d = {}
     for sign, coef, idx in _TERM_RE.findall(expr):
-        i   = int(idx) - 1          # 0-based
-        c   = float(coef) if coef else 1.0
-        sv  = -1.0 if sign == '-' else 1.0
+        i  = int(idx) - 1
+        c  = float(coef) if coef else 1.0
+        sv = -1.0 if sign == '-' else 1.0
         d[i] = d.get(i, 0.0) + sv * c
     return d
 
 def _is_nonnegativity(line: str) -> bool:
-    """
-    Return True if the line is a non-negativity declaration like
-    x1, x2 >= 0   or   x1 >= 0   or   x1, x2, x3 >= 0
-    We skip these — they are not real constraints.
-    """
-    # Strip the line, remove variable references and commas
+    """Return True for lines like 'x1, x2 >= 0' — skip these."""
     stripped = re.sub(r'\bx\d{1,2}\b', '', line, flags=re.IGNORECASE)
     stripped = stripped.replace(',', '').strip()
-    # What's left should be just ">=0" or ">= 0" or "≥0"
-    return bool(re.fullmatch(r'\s*(>=|>|≥)\s*0\.?\s*', stripped))
+    return bool(re.fullmatch(r'\s*(>=|>|<=|<|=)\s*0\.?\s*', stripped))
 
 def parse_lp(text: str):
     lines  = [l.strip() for l in text.split('\n') if l.strip()]
@@ -297,9 +297,9 @@ def parse_lp(text: str):
     opt    = "Maximize"
     n_vars = 0
 
-    def _ensure_vars(needed):
+    def _ensure(idx):
         nonlocal n_vars
-        while n_vars <= needed:
+        while n_vars <= idx:
             c.append(0.0)
             n_vars += 1
 
@@ -308,31 +308,39 @@ def parse_lp(text: str):
     for line in lines:
         ll = line.lower()
 
-        # ── optimisation direction ──────────────────────────
+        # Direction keywords
         if 'maximize' in ll:
             opt = 'Maximize'
         if 'minimize' in ll:
             opt = 'Minimize'
 
-        # ── skip non-negativity lines ───────────────────────
+        # Skip non-negativity declarations
         if _is_nonnegativity(line):
             continue
 
-        # ── objective function ──────────────────────────────
-        # Matches:  "Z = ..."  or  "Maximize Z = ..."  or  "Z: ..."
-        if re.search(r'\bz\s*[=:]', ll) or (
+        # ── Objective: matches "Z = ...", "Maximize Z = ...", "Z: ..." ──
+        # Also matches bare "Maximize 3x1 + 5x2" without Z=
+        is_obj_line = bool(re.search(r'\bz\s*[=:]', ll))
+        is_obj_line = is_obj_line or (
             ('maximize' in ll or 'minimize' in ll) and _TERM_RE.search(line)
-        ):
+        )
+
+        if is_obj_line and not obj_found:
             obj_found = True
-            # take everything after the first '=' or ':'
-            rhs_part = re.split(r'[=:]', line, maxsplit=1)[-1]
+            # Take everything after the first '=' or ':', or after max/min keyword
+            if re.search(r'[=:]', line):
+                rhs_part = re.split(r'[=:]', line, maxsplit=1)[-1]
+            else:
+                # "Maximize 3x1 + 5x2" — strip the keyword
+                rhs_part = re.sub(r'\b(maximize|maximise|minimize|minimise|max|min)\b', '',
+                                  line, flags=re.IGNORECASE)
             d = _parse_expr(rhs_part)
             for idx, val in d.items():
-                _ensure_vars(idx)
+                _ensure(idx)
                 c[idx] = val
             continue
 
-        # ── constraint lines ────────────────────────────────
+        # ── Constraint lines ──
         m = re.search(r'(<=|>=|(?<![<>])=(?![>=]))', line)
         if m:
             sign  = m.group(1)
@@ -341,10 +349,10 @@ def parse_lp(text: str):
                 continue
 
             lhs_d = _parse_expr(parts[0])
-            if not lhs_d:          # no variables on LHS → skip
-                continue
+            if not lhs_d:
+                continue   # no variables on LHS → skip (e.g. non-negativity)
 
-            nums  = re.findall(r'[+-]?\s*\d+(?:\.\d+)?', parts[1])
+            nums = re.findall(r'[+-]?\s*\d+(?:\.\d+)?', parts[1])
             if not nums:
                 continue
             try:
@@ -352,9 +360,8 @@ def parse_lp(text: str):
             except ValueError:
                 continue
 
-            # Update c length if new variables appeared
             for idx in lhs_d:
-                _ensure_vars(idx)
+                _ensure(idx)
 
             A.append(lhs_d)
             b.append(rhs_v)
@@ -363,7 +370,7 @@ def parse_lp(text: str):
     if not obj_found and not A:
         return [], [], [], [], opt
 
-    # Build dense A matrix
+    # Build dense A
     tv = max(n_vars, len(c), 1)
     while len(c) < tv:
         c.append(0.0)
@@ -378,7 +385,6 @@ def parse_lp(text: str):
 
     return c, A_dense, b, ineq, opt
 
-
 def validate_lp(c, A, b, ineq):
     if not c:
         return False, "No objective coefficients found."
@@ -390,7 +396,6 @@ def validate_lp(c, A, b, ineq):
             return False, f"Constraint {i+1} has {len(row)} vars but objective has {n}."
     if len(A) != len(b) or len(A) != len(ineq):
         return False, "Mismatch between A, b, and inequality signs."
-    # Warn if all coefficients are zero
     if all(abs(v) < 1e-12 for v in c):
         return False, "All objective coefficients are zero — check your input."
     return True, ""
@@ -413,35 +418,28 @@ def normalize_constraints(A, b, ineq):
     return A_out, b_out, iq_out
 
 # ============================================================
-# DUAL GENERATOR
+# DUAL
 # ============================================================
 def generate_dual(c, A, b, ineq, opt):
     At = np.array(A, dtype=float).T.tolist()
-    # Primal <=  →  Dual y >= 0
-    # Primal >=  →  Dual y <= 0
-    # Primal =   →  Dual y unrestricted
     d_bounds = []
     for s in ineq:
         if   s == "<=": d_bounds.append((0, None))
         elif s == ">=": d_bounds.append((None, 0))
         else:           d_bounds.append((None, None))
-    # Dual constraint direction depends on primal opt
     dineq = [">=" if opt == "Maximize" else "<=" for _ in c]
     dtype = "Minimize" if opt == "Maximize" else "Maximize"
     return list(b), At, list(c), dineq, dtype, d_bounds
 
-# ============================================================
-# DUAL SOLVER
-# ============================================================
 def solve_dual(dc, dA, db, dineq, dtype, d_bounds):
-    sign_d  = 1 if dtype == "Minimize" else -1
-    dc_arr  = [sign_d * v for v in dc]
+    sign_d = 1 if dtype == "Minimize" else -1
+    dc_arr = [sign_d * v for v in dc]
     A_ub, b_ub, A_eq, b_eq = [], [], [], []
     n = min(len(dA), len(dineq), len(db))
     for i in range(n):
-        if   dineq[i] == "<=": A_ub.append(dA[i]);            b_ub.append(db[i])
+        if   dineq[i] == "<=": A_ub.append(dA[i]);              b_ub.append(db[i])
         elif dineq[i] == ">=": A_ub.append([-v for v in dA[i]]); b_ub.append(-db[i])
-        else:                   A_eq.append(dA[i]);            b_eq.append(db[i])
+        else:                   A_eq.append(dA[i]);              b_eq.append(db[i])
     return linprog(dc_arr,
                    A_ub=A_ub or None, b_ub=b_ub or None,
                    A_eq=A_eq or None, b_eq=b_eq or None,
@@ -459,19 +457,19 @@ def simplex_iterations(c, A, b, max_iter=50):
     tableau.append([-ci for ci in c] + [0.0]*n_con + [0.0])
     basis = [f"s{i+1}" for i in range(n_con)]
     cols  = [f"x{i+1}" for i in range(n_var)] + [f"s{i+1}" for i in range(n_con)] + ["RHS"]
-    T = np.array(tableau, dtype=float)
+    T     = np.array(tableau, dtype=float)
     records = []
     for it in range(max_iter):
         obj = T[-1, :-1]
         pc  = int(np.argmin(obj))
         if obj[pc] >= -1e-9: break
-        ratios = np.where(T[:-1, pc] > 1e-9, T[:-1,-1]/T[:-1,pc], np.inf)
+        ratios = np.where(T[:-1,pc] > 1e-9, T[:-1,-1]/T[:-1,pc], np.inf)
         pr = int(np.argmin(ratios))
         if ratios[pr] == np.inf: break
         entering, leaving = cols[pc], basis[pr]
         T[pr] /= T[pr, pc]
         for i in range(len(T)):
-            if i != pr: T[i] -= T[i, pc] * T[pr]
+            if i != pr: T[i] -= T[i,pc] * T[pr]
         basis[pr] = entering
         df = pd.DataFrame(T, columns=cols,
                           index=[f"R{i+1}" for i in range(n_con)]+["Z"]).round(4)
@@ -490,11 +488,11 @@ def simplex_iterations(c, A, b, max_iter=50):
 # ============================================================
 def bigm_iterations(c, A, b, ineq, opt, max_iter=80):
     n_v, n_c = len(c), len(A)
-    sign = -1.0 if opt == "Maximize" else 1.0
+    sign  = -1.0 if opt == "Maximize" else 1.0
     c_arr = [sign*ci for ci in c]
-    n_slack  = sum(1 for iq in ineq if iq in ("<=",">="))
-    n_artif  = sum(1 for iq in ineq if iq in (">=","="))
-    total    = n_v + n_slack + n_artif + 1
+    n_slack = sum(1 for iq in ineq if iq in ("<=",">="))
+    n_artif = sum(1 for iq in ineq if iq in (">=","="))
+    total   = n_v + n_slack + n_artif + 1
     cols = ([f"x{i+1}" for i in range(n_v)] +
             [f"s{i+1}" for i in range(n_slack)] +
             [f"a{i+1}" for i in range(n_artif)] + ["RHS"])
@@ -525,7 +523,7 @@ def bigm_iterations(c, A, b, ineq, opt, max_iter=80):
         entering, leaving = cols[pc], basis[pr]
         T[pr] /= T[pr, pc]
         for i in range(len(T)):
-            if i != pr: T[i] -= T[i, pc] * T[pr]
+            if i != pr: T[i] -= T[i,pc] * T[pr]
         basis[pr] = entering
         df = pd.DataFrame(T, columns=cols,
                           index=[f"R{i+1}" for i in range(n_c)]+["Z"]).round(4)
@@ -562,14 +560,15 @@ def solve_primal(c, A, b, ineq, opt):
 # ANALYSIS
 # ============================================================
 def generate_analysis(c, A, b, ineq, opt, primal_sol, primal_obj,
-                       dual_sol, dual_obj, method_used, feasible, dc, dA, db, dineq, dtype):
+                       dual_sol, dual_obj, method_used, feasible,
+                       dc, dA, db, dineq, dtype):
     n, m = len(c), len(A)
     lines = []
     if method_used == "Big-M":
         ge = sum(1 for iq in ineq if iq==">=")
         eq = sum(1 for iq in ineq if iq=="=")
         lines.append(f"**Why Big-M?** Your problem has {ge} '>=' and {eq} '=' constraint(s). "
-            "Standard Simplex needs a ready identity basis — Big-M adds artificial variables "
+            "Standard Simplex needs a ready identity basis. Big-M adds artificial variables "
             f"with penalty M={BIG_M:.0e} to force them out, giving a valid starting BFS.")
     else:
         lines.append("**Why Simplex?** All constraints are '<=' so slack variables form "
@@ -580,7 +579,7 @@ def generate_analysis(c, A, b, ineq, opt, primal_sol, primal_obj,
     zeros  = [f"x{i+1}" for i in range(n) if abs(primal_sol[i])<=1e-6]
     if active:
         lines.append(f"**Optimal Primal:** {', '.join(f'{v}={val}' for v,val in active)}. "
-            + (f"Variables {', '.join(zeros)} are non-basic (=0) — not used at optimality." if zeros else
+            + (f"Variables {', '.join(zeros)} are non-basic (=0) at optimality." if zeros else
                "All variables are active at the optimal vertex."))
     else:
         lines.append("**Primal Solution:** All variables are zero — may be trivial or degenerate.")
@@ -588,12 +587,12 @@ def generate_analysis(c, A, b, ineq, opt, primal_sol, primal_obj,
     gap = abs(primal_obj - dual_obj)
     if gap < 1e-3 and feasible:
         lines.append(f"**Strong Duality holds:** Primal Z = {round(primal_obj,4)}, "
-            f"Dual W = {round(dual_obj,4)}. Both objectives match — confirming global optimality.")
+            f"Dual W = {round(dual_obj,4)}. Both objectives match - confirming global optimality.")
     elif not feasible:
-        lines.append("**WARNING — Feasibility issue:** Artificial variables remain in the basis. "
+        lines.append("**WARNING - Feasibility issue:** Artificial variables remain in the basis. "
             "The problem may be infeasible or unbounded. Review constraint RHS values.")
     else:
-        lines.append(f"**Duality gap = {round(gap,6)}** — small numerical discrepancy (floating-point).")
+        lines.append(f"**Duality gap = {round(gap,6)}** - small numerical discrepancy (floating-point).")
 
     binding = []
     for i in range(m):
@@ -610,7 +609,7 @@ def generate_analysis(c, A, b, ineq, opt, primal_sol, primal_obj,
             "Each yi = marginal value of relaxing constraint i by 1 unit.")
 
     lines.append(f"**Objective ({opt}):** Z = {' + '.join(f'{c[i]}*x{i+1}' for i in range(n))}. "
-        f"Optimal Z* = {round(primal_obj,4)} — best achievable within all constraints.")
+        f"Optimal Z* = {round(primal_obj,4)} - best achievable within all constraints.")
     return lines
 
 # ============================================================
@@ -620,17 +619,18 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj, dual_sol, dual_obj)
     n_vars = len(c)
     ncols  = 3 if n_vars == 2 else 2
     fig, axes = plt.subplots(1, ncols, figsize=(6*ncols, 6))
+    if ncols == 1:
+        axes = [axes]
     fig.patch.set_facecolor(SURFACE)
     for ax in axes:
         ax.set_facecolor(SURFACE)
         ax.tick_params(colors=TEXT_MED, labelsize=9)
         for sp in ax.spines.values(): sp.set_edgecolor(BORDER)
 
-    # Chart 1 — primal bar
-    ax1 = axes[0]
-    bars = ax1.bar([f"x{i+1}" for i in range(n_vars)], primal_sol,
-                   color=CHART_COLORS[:n_vars], edgecolor='none', zorder=3, width=0.5, alpha=0.9)
-    mx = max(primal_sol) if any(v>0 for v in primal_sol) else 1
+    ax1   = axes[0]
+    mx    = max(primal_sol) if any(v>0 for v in primal_sol) else 1
+    bars  = ax1.bar([f"x{i+1}" for i in range(n_vars)], primal_sol,
+                    color=CHART_COLORS[:n_vars], edgecolor='none', zorder=3, width=0.5, alpha=0.9)
     for bar, val in zip(bars, primal_sol):
         ax1.text(bar.get_x()+bar.get_width()/2, bar.get_height()+mx*0.02,
                  f'{val:.3f}', ha='center', va='bottom', color=TEXT_MED, fontsize=9, fontweight='bold')
@@ -639,8 +639,7 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj, dual_sol, dual_obj)
     ax1.yaxis.grid(True, color=BORDER, linestyle='--', alpha=0.5, zorder=0)
     ax1.set_axisbelow(True); ax1.axhline(0, color=BORDER, linewidth=0.8)
 
-    # Chart 2 — dual pie
-    ax2 = axes[1]
+    ax2  = axes[1]
     vals = np.array(dual_sol)
     if vals.sum() > 1e-9:
         _, _, ats = ax2.pie(np.abs(vals)+1e-9,
@@ -654,18 +653,15 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj, dual_sol, dual_obj)
                  color=TEXT_MED, fontsize=11, transform=ax2.transAxes)
     ax2.set_title("Dual Variables (Shadow Prices)", color=TEXT_MED, fontsize=11, fontweight='bold', pad=10)
 
-    # Chart 3 — feasible region (2-var only)
     if n_vars == 2:
         ax3 = axes[2]
         ax3.set_facecolor(SURFACE)
         ax3.tick_params(colors=TEXT_MED, labelsize=9)
         for sp in ax3.spines.values(): sp.set_edgecolor(BORDER)
-
         max_b  = max(b) if b else 10
-        x_max  = max(max_b * 1.5, primal_sol[0]*2+1, 5)
+        x_max  = max(max_b*1.5, primal_sol[0]*2+1, 5)
         x      = np.linspace(0, x_max, 500)
         c_cols = [ACCENT3, WARN, ACCENT2, ACCENT, "#FBBF24", "#FB923C"]
-
         for i, (row, rhs, sign) in enumerate(zip(A, b, ineq)):
             a1, a2 = row[0], row[1]
             col    = c_cols[i % len(c_cols)]
@@ -676,8 +672,6 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj, dual_sol, dual_obj)
                 ax3.plot(x[mask], y[mask], color=col, linewidth=2, label=lbl, alpha=0.9)
             elif abs(a1) > 1e-9:
                 ax3.axvline(rhs/a1, color=col, linewidth=2, label=lbl, alpha=0.9)
-
-        # Shade feasible region
         try:
             from scipy.spatial import ConvexHull
             pts = []
@@ -701,11 +695,9 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj, dual_sol, dual_obj)
                 ax3.add_patch(poly)
         except Exception:
             pass
-
         ox, oy = primal_sol[0], primal_sol[1]
         ax3.scatter([ox],[oy], color=ACCENT, s=200, zorder=10,
-                    edgecolors='white', linewidth=2,
-                    label=f"Optimal ({ox:.2f},{oy:.2f})")
+                    edgecolors='white', linewidth=2, label=f"Optimal ({ox:.2f},{oy:.2f})")
         ax3.annotate(f"Z*={round(primal_obj,2)}",
                      xy=(ox,oy), xytext=(ox+x_max*0.05, oy+x_max*0.06),
                      color=ACCENT, fontsize=9, fontweight='bold',
@@ -713,8 +705,8 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj, dual_sol, dual_obj)
         ax3.set_xlim(-x_max*0.04, x_max); ax3.set_ylim(-x_max*0.04, x_max)
         ax3.set_xlabel("x1", color=TEXT_MED, fontsize=10)
         ax3.set_ylabel("x2", color=TEXT_MED, fontsize=10)
-        ax3.set_title("Feasible Region & Optimal Point", color=TEXT_MED, fontsize=11,
-                      fontweight='bold', pad=10)
+        ax3.set_title("Feasible Region & Optimal Point", color=TEXT_MED,
+                      fontsize=11, fontweight='bold', pad=10)
         ax3.legend(fontsize=7, framealpha=0.3, facecolor=SURFACE2,
                    edgecolor=BORDER, labelcolor=TEXT_MED, loc='upper right')
         ax3.yaxis.grid(True, color=BORDER, linestyle='--', alpha=0.3)
@@ -725,24 +717,17 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj, dual_sol, dual_obj)
     return fig
 
 # ============================================================
-# PDF helpers
+# PDF BUILDER
 # ============================================================
-def _s(text):
-    """Sanitize text for FPDF (latin-1 safe)."""
-    text = str(text)
-    text = normalize_unicode(text)
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
-    result = ''
-    for ch in text:
-        try:    ch.encode('latin-1'); result += ch
-        except: result += '?'
-    return result
-
 def build_pdf(primal_c, primal_A, primal_b, primal_ineq, primal_opt,
               dual_c, dual_A, dual_b, dual_ineq, dual_opt,
               sol_x, sol_obj, pivot_records, primal_sol, primal_obj,
               method_used, analysis_lines):
-    pdf = FPDF(); pdf.set_auto_page_break(auto=True, margin=15); pdf.add_page()
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    # Header
     pdf.set_fill_color(37,99,235); pdf.rect(0,0,210,44,'F')
     pdf.set_font("Arial","B",20); pdf.set_text_color(255,255,255)
     pdf.cell(0,15,"",ln=True)
@@ -753,7 +738,8 @@ def build_pdf(primal_c, primal_A, primal_b, primal_ineq, primal_opt,
 
     def sec(title, r=37, g=99, b_=235):
         pdf.set_fill_color(r,g,b_); pdf.set_text_color(255,255,255)
-        pdf.set_font("Arial","B",12); pdf.cell(0,9,_s(f"  {title}"),ln=True,fill=True)
+        pdf.set_font("Arial","B",12)
+        pdf.cell(0,9,_s(f"  {title}"),ln=True,fill=True)
         pdf.set_text_color(0,0,0); pdf.ln(2)
 
     n = len(primal_c)
@@ -764,6 +750,7 @@ def build_pdf(primal_c, primal_A, primal_b, primal_ineq, primal_opt,
     for i in range(len(primal_A)):
         pdf.cell(0,7,_s("    " + " + ".join(f"{primal_A[i][j]}*x{j+1}" for j in range(n)) +
                          f"  {primal_ineq[i]}  {primal_b[i]}"),ln=True)
+    pdf.cell(0,7,"  All variables >= 0",ln=True)
     pdf.set_font("Arial","B",10)
     pdf.cell(0,7,_s(f"Optimal Z = {round(primal_obj,6)}  x = {[round(v,4) for v in primal_sol]}"),ln=True)
     pdf.ln(4)
@@ -776,6 +763,7 @@ def build_pdf(primal_c, primal_A, primal_b, primal_ineq, primal_opt,
     for i in range(len(dual_A)):
         pdf.cell(0,7,_s("    " + " + ".join(f"{dual_A[i][j]}*y{j+1}" for j in range(len(dual_A[i]))) +
                          f"  {dual_ineq[i]}  {dual_b[i]}"),ln=True)
+    pdf.cell(0,7,"  All variables >= 0",ln=True)
     pdf.set_font("Arial","B",10)
     pdf.cell(0,7,_s(f"Optimal W = {round(sol_obj,6)}  y = {[round(v,4) for v in sol_x]}"),ln=True)
     pdf.ln(4)
@@ -802,17 +790,20 @@ def build_pdf(primal_c, primal_A, primal_b, primal_ineq, primal_opt,
             pdf.cell(cw[4],6,_s(rec["method"]),border=1,align="C")
             pdf.ln()
         pdf.ln(4)
-        pdf.set_font("Arial","B",10); pdf.cell(0,8,"Detailed Tableaux:",ln=True); pdf.ln(2)
+        pdf.set_font("Arial","B",10)
+        pdf.cell(0,8,"Detailed Tableaux:",ln=True); pdf.ln(2)
         for rec in pivot_records:
             if pdf.get_y() > 240: pdf.add_page()
             pdf.set_font("Arial","B",9); pdf.set_text_color(37,99,235)
-            pdf.cell(0,7,_s(f"  Iter {rec['iteration']}  Enter:{rec['entering']}  Leave:{rec['leaving']}  Basis:{', '.join(rec['basis'])}"),ln=True)
+            pdf.cell(0,7,_s(f"  Iter {rec['iteration']}  Enter:{rec['entering']}  "
+                            f"Leave:{rec['leaving']}  Basis:{', '.join(rec['basis'])}"),ln=True)
             pdf.set_text_color(0,0,0)
             df  = rec["tableau"]; nc = len(df.columns)
             cw2 = min(20, int(190//(nc+1)))
             pdf.set_font("Arial","B",7); pdf.set_fill_color(220,235,255)
             pdf.cell(cw2,5,"Row",border=1,align="C",fill=True)
-            for col in df.columns: pdf.cell(cw2,5,_s(str(col)[:6]),border=1,align="C",fill=True)
+            for col in df.columns:
+                pdf.cell(cw2,5,_s(str(col)[:6]),border=1,align="C",fill=True)
             pdf.ln(); pdf.set_font("Courier","",6)
             for ridx, rrow in df.iterrows():
                 pdf.cell(cw2,5,_s(str(ridx)[:5]),border=1,align="C")
@@ -820,9 +811,11 @@ def build_pdf(primal_c, primal_A, primal_b, primal_ineq, primal_opt,
                 pdf.ln()
             pdf.ln(3)
 
+    # ← FIXED: use bytes(pdf.output()) instead of encode('latin-1')
     buf = io.BytesIO()
-    buf.write(pdf.output(dest='S').encode('latin-1'))
-    buf.seek(0); return buf
+    buf.write(bytes(pdf.output()))
+    buf.seek(0)
+    return buf
 
 def build_csv(primal_sol, primal_obj, dual_sol, dual_obj):
     rows = []
@@ -833,29 +826,48 @@ def build_csv(primal_sol, primal_obj, dual_sol, dual_obj):
     return pd.DataFrame(rows).to_csv(index=False)
 
 # ============================================================
-# FORMULA RENDERER
+# FORMULA RENDERER  ← FIXED: safe int conversion, handles empty lists
 # ============================================================
 def render_lp_formula(c, A, b, ineq, opt, is_dual=False):
+    # Guard against empty inputs
+    if not c or not A:
+        return f"<div style='color:{WARN};padding:12px;'>No valid LP data to display.</div>"
+
     vs, os_ = ("y","W") if is_dual else ("x","Z")
     n = len(c)
+
     def term(coef, var):
-        coef = int(coef) if float(coef)==int(float(coef)) else coef
+        try:
+            coef_f = float(coef)
+            coef_d = int(coef_f) if coef_f == int(coef_f) else coef_f
+        except (TypeError, ValueError):
+            coef_d = coef
         return (f"<span style='color:{ACCENT};font-weight:700;"
-                f"font-family:JetBrains Mono,monospace;'>{coef}</span>{var}")
+                f"font-family:JetBrains Mono,monospace;'>{coef_d}</span>{var}")
+
     obj_html = (f"<span style='color:{ACCENT2};font-weight:700;'>{opt}</span> &nbsp;"
                 f"<span style='color:{TEXT};font-weight:700;font-family:JetBrains Mono,monospace;'>{os_} = </span>"
-                + " + ".join(term(c[i],f"{vs}<sub>{i+1}</sub>") for i in range(n)))
+                + " + ".join(term(c[i], f"{vs}<sub>{i+1}</sub>") for i in range(n)))
+
     con_rows = ""
     for i, row in enumerate(A):
-        lhs = " + ".join(term(row[j],f"{vs}<sub>{j+1}</sub>") for j in range(len(row)))
-        rv  = int(b[i]) if float(b[i])==int(float(b[i])) else b[i]
-        ic  = ACCENT3 if ineq[i]=="<=" else (WARN if ineq[i]==">=" else ACCENT2)
+        if i >= len(b) or i >= len(ineq):
+            break
+        lhs = " + ".join(term(row[j], f"{vs}<sub>{j+1}</sub>") for j in range(len(row)))
+        # ← FIXED: safe conversion — handles None, non-numeric, large floats
+        try:
+            bv    = float(b[i])
+            rv    = int(bv) if bv == int(bv) else round(bv, 4)
+        except (TypeError, ValueError):
+            rv = b[i]
+        ic = ACCENT3 if ineq[i]=="<=" else (WARN if ineq[i]==">=" else ACCENT2)
         con_rows += (f"<div style='margin:4px 0;padding:6px 12px;background:{SURFACE2};"
                      f"border-radius:8px;border-left:3px solid {ic};'>"
                      f"<span style='color:{TEXT_MUTED};font-size:0.75rem;'>C{i+1}&nbsp;</span>"
                      f"{lhs}&nbsp;<span style='color:{ic};font-weight:700;'>{ineq[i]}</span>&nbsp;"
                      f"<span style='color:{ACCENT};font-weight:700;"
                      f"font-family:JetBrains Mono,monospace;'>{rv}</span></div>")
+
     nn = ", ".join(f"{vs}<sub>{i+1}</sub>" for i in range(n))
     return (f"<div style='background:{SURFACE};border:1px solid {BORDER};border-radius:14px;padding:20px 24px;'>"
             f"<div style='margin-bottom:12px;font-size:1rem;'>{obj_html}</div>"
@@ -868,11 +880,11 @@ def render_lp_formula(c, A, b, ineq, opt, is_dual=False):
 # INPUT SECTION
 # ============================================================
 st.markdown("<div class='lp-card' style='padding-bottom:12px;'>", unsafe_allow_html=True)
-st.markdown(f"<span style='font-size:1.1rem;font-weight:700;color:{TEXT}!important;'>&#x1F4E5; Input Mode</span>", unsafe_allow_html=True)
+st.markdown(f"<span style='font-size:1.1rem;font-weight:700;color:{TEXT}!important;'>&#x1F4E5; Input Mode</span>",
+            unsafe_allow_html=True)
 mode = st.selectbox("", ["✏️ Manual Entry","📝 Text / Equation","🖼️ Image OCR","📊 CSV Upload"],
                     label_visibility="collapsed")
 st.markdown("</div>", unsafe_allow_html=True)
-
 st.markdown("<div class='lp-card'>", unsafe_allow_html=True)
 
 # ── Manual Entry ────────────────────────────────────────────
@@ -882,14 +894,17 @@ if mode == "✏️ Manual Entry":
     num_vars = col1.number_input("Variables",1,10,2)
     num_cons = col2.number_input("Constraints",1,10,2)
     opt      = col3.selectbox("Optimisation",["Maximize","Minimize"])
-    st.markdown(f"<p style='font-weight:700;color:{TEXT}!important;margin-top:12px;'>Objective Coefficients</p>", unsafe_allow_html=True)
+    st.markdown(f"<p style='font-weight:700;color:{TEXT}!important;margin-top:12px;'>Objective Coefficients</p>",
+                unsafe_allow_html=True)
     c_cols = st.columns(int(num_vars))
     c = [c_cols[i].number_input(f"c(x{i+1})",value=0.0,key=f"c{i}",format="%.2f") for i in range(int(num_vars))]
-    st.markdown(f"<p style='font-weight:700;color:{TEXT}!important;margin-top:12px;'>Constraint Matrix</p>", unsafe_allow_html=True)
+    st.markdown(f"<p style='font-weight:700;color:{TEXT}!important;margin-top:12px;'>Constraint Matrix</p>",
+                unsafe_allow_html=True)
     A, b, ineq = [], [], []
     for i in range(int(num_cons)):
         cols = st.columns(int(num_vars)+2)
-        row  = [cols[j].number_input(f"a{i+1},{j+1}",value=0.0,key=f"a{i}_{j}",format="%.2f") for j in range(int(num_vars))]
+        row  = [cols[j].number_input(f"a{i+1},{j+1}",value=0.0,key=f"a{i}_{j}",format="%.2f")
+                for j in range(int(num_vars))]
         sign = cols[-2].selectbox("",["<=",">=","="],key=f"s{i}")
         rhs  = cols[-1].number_input("RHS",value=0.0,key=f"b{i}",format="%.2f")
         A.append(row); b.append(rhs); ineq.append(sign)
@@ -906,18 +921,15 @@ elif mode == "📝 Text / Equation":
     st.markdown(f"<h3 style='margin-top:0;color:{TEXT}!important;'>Text / Equation Input</h3>", unsafe_allow_html=True)
     st.markdown(f"""<div style='background:{SURFACE2};border:1px solid {BORDER};border-radius:10px;
     padding:14px 18px;margin-bottom:14px;font-family:JetBrains Mono,monospace;font-size:0.85rem;color:{TEXT_MED}!important;'>
-    <b style='color:{ACCENT};'>Format — use x1, x2 for variables:</b><br><br>
+    <b style='color:{ACCENT};'>Supported formats (subscripts x&#x2081; and plain x1 both work):</b><br><br>
     <span style='color:{ACCENT2};'>Maximize</span> Z = 5x1 + 4x2<br>
-    6x1 + 4x2 &lt;= 24<br>
-    x1 + 2x2 &lt;= 6<br><br>
+    6x1 + 4x2 &lt;= 24<br>x1 + 2x2 &lt;= 6<br><br>
     <span style='color:{ACCENT2};'>Minimize</span> Z = 2x1 + 3x2<br>
-    x1 + x2 >= 4<br>
-    x1 - x2 = 1<br><br>
+    x1 + x2 &gt;= 4<br>x1 - x2 = 1<br><br>
     <span style='color:{TEXT_MUTED};font-size:0.78rem;'>
-    Subscript characters (x&#x2081;, x&#x2082;) are automatically converted.
-    Do NOT paste the dual LP here — it uses y variables.</span>
+    Both &lt;= and &#x2264; are accepted. Subscript x&#x2081; is auto-converted to x1.</span>
     </div>""", unsafe_allow_html=True)
-    text_input = st.text_area("LP Problem", height=160, placeholder="Type your LP problem here…")
+    text_input = st.text_area("LP Problem", height=180, placeholder="Type your LP problem here…")
     if st.button("🔍 Parse & Save", use_container_width=True):
         cleaned = clean_lp(text_input)
         c, A, b, ineq, opt = parse_lp(cleaned)
@@ -934,23 +946,15 @@ elif mode == "📝 Text / Equation":
                 p2.markdown(f"**Signs:** `{ineq}`  **Opt:** `{opt}`")
         else:
             st.error(f"Parse error: {err}")
-            st.info("💡 Tip: Make sure variables are written as x1, x2 (not x₁, x₂ or y1, y2). "
-                    "Include 'Maximize Z = ...' or 'Minimize Z = ...' on the first line.")
+            st.info("💡 Tip: Write variables as x1, x2. Include 'Maximize Z = ...' on the first line. "
+                    "Subscripts like x₁ are automatically handled.")
 
 # ── Image OCR ───────────────────────────────────────────────
 elif mode == "🖼️ Image OCR":
     st.markdown(f"<h3 style='margin-top:0;color:{TEXT}!important;'>Image OCR (Tesseract)</h3>", unsafe_allow_html=True)
-    st.markdown(f"""<div style='background:{SURFACE2};border:1px dashed {BORDER};border-radius:10px;
-    padding:12px 16px;margin-bottom:14px;font-size:0.83rem;color:{TEXT_MUTED}!important;'>
-    💡 <b style='color:{TEXT_MED}!important;'>Tips:</b>
-    Clear high-contrast printed text works best.
-    Write as: <code>Maximize Z = 5x1 + 4x2</code>.
-    Edit the extracted text before parsing if needed.</div>""", unsafe_allow_html=True)
-
     tess_ok = get_tesseract_available()
     if not tess_ok:
-        st.warning("⚠️ Tesseract not found on this server. OCR unavailable.")
-
+        st.warning("⚠️ Tesseract not found. OCR unavailable.")
     file = st.file_uploader("Upload image", type=["png","jpg","jpeg","bmp","webp"])
     if file and tess_ok:
         image   = Image.open(file).convert("RGB")
@@ -977,19 +981,12 @@ elif mode == "🖼️ Image OCR":
                 st.session_state.data = (c, A, b, ineq, opt)
                 nb = any(iq in (">=","=") for iq in ineq)
                 st.success(f"✓ Parsed: {len(c)} vars, {len(A)} constraints — **{'Big-M' if nb else 'Simplex'}**")
-                with st.expander("🔎 Parsed Values"):
-                    p1,p2 = st.columns(2)
-                    p1.markdown(f"**c:** `{c}`"); p1.markdown(f"**b:** `{b}`")
-                    p2.markdown(f"**A:** `{A}`"); p2.markdown(f"**ineq:** `{ineq}`")
             else:
                 st.error(f"Parser error: {err} — edit the text above and retry.")
 
 # ── CSV Upload ──────────────────────────────────────────────
 elif mode == "📊 CSV Upload":
     st.markdown(f"<h3 style='margin-top:0;color:{TEXT}!important;'>CSV Upload</h3>", unsafe_allow_html=True)
-    st.markdown(f"""<div style='background:{SURFACE2};border:1px solid {BORDER};border-radius:10px;
-    padding:12px 16px;margin-bottom:14px;font-size:0.83rem;color:{TEXT_MUTED}!important;'>
-    Format: columns = <code>x1, x2, ..., xn, RHS</code>. One row per constraint.</div>""", unsafe_allow_html=True)
     file = st.file_uploader("Upload CSV", type=["csv"])
     if file:
         df    = pd.read_csv(file); st.dataframe(df, use_container_width=True)
@@ -1015,8 +1012,8 @@ st.markdown("</div>", unsafe_allow_html=True)
 # ============================================================
 if "data" in st.session_state:
     c_p,A_p,b_p,iq_p,op_p = st.session_state.data
-    nb = any(iq in (">=","=") for iq in iq_p)
-    ml = "Big-M Method" if nb else "Simplex Method"
+    nb     = any(iq in (">=","=") for iq in iq_p)
+    ml     = "Big-M Method" if nb else "Simplex Method"
     tc_tag = ACCENT2 if nb else ACCENT3
     st.markdown(f"""<div style='display:flex;align-items:center;gap:8px;margin:14px 0 8px;'>
     <span style='font-size:1.1rem;font-weight:700;color:{TEXT}!important;'>Problem Preview</span>
@@ -1054,11 +1051,11 @@ if solve_clicked:
     sol_x   = res.x
     sol_obj = -res.fun if dtype=="Maximize" else res.fun
 
-    # ── Header ──────────────────────────────────────────────
     st.markdown(f"""<div style='margin:28px 0 18px;'>
     <span style='font-size:0.75rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:{ACCENT};'>Results</span>
     <h2 style='margin:4px 0 0;color:{TEXT}!important;font-size:1.8rem;font-weight:800;'>Solution Report</h2>
     </div>""", unsafe_allow_html=True)
+
     sc_col = ACCENT3 if feasible else WARN
     st.markdown(f"""<div style='background:{sc_col}22;border:1px solid {sc_col};border-radius:12px;
     padding:12px 20px;margin-bottom:20px;color:{sc_col}!important;font-weight:600;'>
@@ -1066,7 +1063,6 @@ if solve_clicked:
      "⚠ Feasibility issue — artificial variables remain in basis. Review constraints."}
     </div>""", unsafe_allow_html=True)
 
-    # ── Metrics ─────────────────────────────────────────────
     st.markdown(f"<p style='font-weight:700;color:{TEXT_MUTED}!important;font-size:0.78rem;"
                 f"text-transform:uppercase;letter-spacing:0.08em;'>Primal Solution</p>", unsafe_allow_html=True)
     pcols = st.columns(len(primal_sol)+1)
@@ -1075,7 +1071,8 @@ if solve_clicked:
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(f"<p style='font-weight:700;color:{TEXT_MUTED}!important;font-size:0.78rem;"
-                f"text-transform:uppercase;letter-spacing:0.08em;'>Dual Solution / Shadow Prices</p>", unsafe_allow_html=True)
+                f"text-transform:uppercase;letter-spacing:0.08em;'>Dual Solution / Shadow Prices</p>",
+                unsafe_allow_html=True)
     dcols = st.columns(len(sol_x)+1)
     for i,v in enumerate(sol_x): dcols[i].metric(f"y{i+1}", f"{v:.4f}")
     dcols[-1].metric("W (Dual)", f"{sol_obj:.4f}")
@@ -1097,7 +1094,7 @@ if solve_clicked:
         st.dataframe(pd.DataFrame({
             "Variable":[f"y{i+1}" for i in range(len(sol_x))],
             "Value":np.round(sol_x,6),
-            "Meaning":[f"Shadow price — Constraint {i+1}" for i in range(len(sol_x))]
+            "Meaning":[f"Shadow price - Constraint {i+1}" for i in range(len(sol_x))]
         }), use_container_width=True)
 
     with tabs[2]:
@@ -1105,13 +1102,8 @@ if solve_clicked:
             mtc = ACCENT2 if method_used=="Big-M" else ACCENT3
             st.markdown(f"""<div style='margin-bottom:16px;'>
             <span style='background:{mtc}22;color:{mtc}!important;padding:4px 12px;border-radius:999px;
-            font-size:0.78rem;font-weight:700;'>{method_used} — {len(pivot_records)} iteration(s)</span></div>""",
+            font-size:0.78rem;font-weight:700;'>{method_used} - {len(pivot_records)} iteration(s)</span></div>""",
                         unsafe_allow_html=True)
-            if method_used=="Big-M":
-                st.markdown(f"""<div style='background:{SURFACE2};border:1px solid {BORDER};border-radius:10px;
-                padding:12px 16px;margin-bottom:14px;font-size:0.83rem;color:{TEXT_MED}!important;'>
-                <b style='color:{TEXT}!important;'>Big-M:</b> Artificial variables a1, a2, … added to &ge; and = 
-                constraints with penalty M={BIG_M:.0e}. They must reach 0 for feasibility.</div>""", unsafe_allow_html=True)
             summary = pd.DataFrame([{"Iter":r["iteration"],"Method":r["method"],
                 "Entering":r["entering"],"Leaving":r["leaving"],"Basis":", ".join(r["basis"])}
                 for r in pivot_records])
@@ -1133,7 +1125,7 @@ if solve_clicked:
         fig = plot_results(c,A,b,ineq,opt,primal_sol,primal_obj,sol_x,sol_obj)
         st.pyplot(fig); plt.close(fig)
         if len(c) != 2:
-            st.info("💡 Feasible region chart is available for 2-variable problems only.")
+            st.info("💡 Feasible region chart available for 2-variable problems only.")
 
     with tabs[4]:
         st.markdown(f"""<div style='background:{SURFACE};border:1px solid {BORDER};
@@ -1150,7 +1142,6 @@ if solve_clicked:
                 f"{display}</p></div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── Exports ─────────────────────────────────────────────
     st.markdown("---")
     with st.spinner("Building PDF…"):
         pdf_buf = build_pdf(c,A,b,ineq,opt,dc,dA,db,dineq,dtype,
