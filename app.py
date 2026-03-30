@@ -364,42 +364,77 @@ def generate_dual(c, A, b, ineq, opt):
 # SIMPLEX METHOD
 # ============================================================
 def simplex_iterations(c, A, b, max_iter=50):
+    """
+    Solves a maximization problem in standard form using the Simplex Method.
+    Assumes constraints are of the form Ax <= b and x >= 0.
+    """
     n_con, n_var = len(A), len(c)
     tableau = []
+
+    # --- 1. INITIALIZE TABLEAU ---
+    # Add slack variables to convert inequalities (<=) into equalities
     for i, row in enumerate(A):
         slack = [1.0 if j == i else 0.0 for j in range(n_con)]
         tableau.append(list(row) + slack + [b[i]])
+
+    # Objective function row: Z - c1x1 - c2x2 ... = 0
     obj = [-ci for ci in c] + [0.0] * n_con + [0.0]
     tableau.append(obj)
+
+    # Track which variables are currently in the basis (starting with slacks)
     basis = [f"s{i+1}" for i in range(n_con)]
     col_labels = ([f"x{i+1}" for i in range(n_var)] +
                   [f"s{i+1}" for i in range(n_con)] + ["RHS"])
+    
     tableau = np.array(tableau, dtype=float)
     records = []
 
+    # --- 2. ITERATION LOOP ---
     for iteration in range(max_iter):
+        # Identify the "Entering Variable" (most negative coefficient in objective row)
         obj_row = tableau[-1, :-1]
         pivot_col = int(np.argmin(obj_row))
+
+        # Optimality Check: If no negative coefficients, we've reached the maximum
         if obj_row[pivot_col] >= -1e-9:
             break
+
+        # --- 3. MINIMUM RATIO TEST ---
+        # Determine the "Leaving Variable" to maintain feasibility
         rhs = tableau[:-1, -1]
         col_val = tableau[:-1, pivot_col]
+        
+        # Avoid division by zero or negative values; only consider positive entries in pivot column
         ratios = np.where(col_val > 1e-9, rhs / col_val, np.inf)
         pivot_row = int(np.argmin(ratios))
+
+        # If all ratios are infinity, the problem is unbounded
         if ratios[pivot_row] == np.inf:
             break
+
+        # Log movement
         entering = col_labels[pivot_col]
         leaving = basis[pivot_row]
+
+        # --- 4. PIVOTING (GAUSS-JORDAN ELIMINATION) ---
+        # Normalize the pivot row so the pivot element becomes 1
         tableau[pivot_row] /= tableau[pivot_row, pivot_col]
+
+        # Eliminate the entering variable from all other rows
         for i in range(len(tableau)):
             if i != pivot_row:
                 tableau[i] -= tableau[i, pivot_col] * tableau[pivot_row]
+
+        # Update the basis with the entering variable
         basis[pivot_row] = entering
+
+        # Store a snapshot of the current state for visualization/reporting
         df = pd.DataFrame(
             tableau,
             columns=col_labels,
             index=[f"R{i+1}" for i in range(n_con)] + ["Z"]
         ).round(4)
+        
         records.append({
             "iteration": iteration + 1,
             "entering": entering,
@@ -409,13 +444,17 @@ def simplex_iterations(c, A, b, max_iter=50):
             "method": "Simplex"
         })
 
+    # --- 5. EXTRACT FINAL SOLUTION ---
     solution = [0.0] * n_var
     for i, bv in enumerate(basis):
+        # If a decision variable (x_i) is in the basis, its value is in the RHS column
         m = re.match(r'x(\d+)', bv)
         if m:
             xi = int(m.group(1)) - 1
             if xi < n_var:
                 solution[xi] = round(tableau[i, -1], 6)
+    
+    # Return all iteration steps, the final x values, and the max Z value
     return records, solution, round(tableau[-1, -1], 6)
 
 # ============================================================
