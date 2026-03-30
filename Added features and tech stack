@@ -1,0 +1,11 @@
+## 📌 Features
+- Solve Linear Programming problems
+- Supports Duality Method
+- Supports Big M Method
+- Text & CSV input
+
+## 🛠️ Tech Stack
+- Python
+- Streamlit
+- NumPy, Pandas, SciPy
+- Matplotlib
