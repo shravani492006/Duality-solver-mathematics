@@ -1315,18 +1315,52 @@ st.markdown("</div>", unsafe_allow_html=True)
 # ============================================================
 # PROBLEM PREVIEW
 # ============================================================
+
+# Check if problem data exists in session state
 if "data" in st.session_state:
+    
+    # Step 1: Extract stored values
+    # c_p → objective coefficients
+    # A_p → constraint coefficients matrix
+    # b_p → RHS values
+    # ineq_p → inequality signs (<=, >=, =)
+    # opt_p → optimization type (Maximize/Minimize)
     c_p, A_p, b_p, ineq_p, opt_p = st.session_state.data
+    
+    # Step 2: Check if Big-M method is required
+    # Needed if any constraint is >= or =
     needs_bigm = any(iq in (">=", "=") for iq in ineq_p)
+    
+    # Step 3: Decide method label (Big-M or Simplex)
     ml = "Big-M Method" if needs_bigm else "Simplex Method"
+    
+    # Step 4: Choose tag color based on method
     tc_tag = ACCENT2 if needs_bigm else ACCENT3
+    
+    # Step 5: Display header with styling using HTML
     st.markdown(f"""<div style='display:flex;align-items:center;gap:8px;margin:14px 0 8px;'>
-    <span style='font-size:1.1rem;font-weight:700;color:{TEXT}!important;'>Problem Preview</span>
+    
+    <!-- Title -->
+    <span style='font-size:1.1rem;font-weight:700;color:{TEXT}!important;'>
+    Problem Preview
+    </span>
+    
+    <!-- Tag: Primal -->
     <span style='background:{TAG_BG};color:{TAG_TEXT}!important;padding:3px 10px;border-radius:999px;
-    font-size:0.72rem;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;'>Primal</span>
+    font-size:0.72rem;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;'>
+    Primal
+    </span>
+    
+    <!-- Tag: Method (Big-M or Simplex) -->
     <span style='background:{tc_tag}22;color:{tc_tag}!important;padding:3px 10px;border-radius:999px;
-    font-size:0.72rem;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;'>{ml}</span>
+    font-size:0.72rem;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;'>
+    {ml}
+    </span>
+    
     </div>""", unsafe_allow_html=True)
+    
+    # Step 6: Render and display the LP problem in formatted form
+    # (likely converts it into mathematical representation)
     st.markdown(render_lp_formula(c_p, A_p, b_p, ineq_p, opt_p), unsafe_allow_html=True)
 
 # ============================================================
