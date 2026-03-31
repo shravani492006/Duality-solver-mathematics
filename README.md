@@ -78,6 +78,11 @@ constraint,1,-1,=1
 
 ## 📸 Screenshots
 <img width="1909" height="856" alt="Screenshot 2026-03-30 185249" src="https://github.com/user-attachments/assets/3b8b36ec-7059-4a14-b4cf-fb41c0b11d2b" />
+<img width="1916" height="880" alt="Screenshot 2026-03-30 185334" src="https://github.com/user-attachments/assets/4636f753-2234-4896-a5f1-aff5cbf0ada0" />
+<img width="1912" height="863" alt="Screenshot 2026-03-30 185355" src="https://github.com/user-attachments/assets/8491af14-b7a9-4f67-a8cb-74af5273f75f" />
+<img width="1916" height="871" alt="Screenshot 2026-03-30 185425" src="https://github.com/user-attachments/assets/04671c83-3876-4d1f-b60b-8a93c5d82226" />
+<img width="1896" height="852" alt="Screenshot 2026-03-30 185456" src="https://github.com/user-attachments/assets/45e49bb4-c7a3-43b4-a231-273b47121ef9" />
+<img width="1907" height="885" alt="Screenshot 2026-03-30 185510" src="https://github.com/user-attachments/assets/cbc8c754-dfb7-4f18-be42-49229a7ef367" />
 
 ---
 
