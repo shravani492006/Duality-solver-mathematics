@@ -364,77 +364,42 @@ def generate_dual(c, A, b, ineq, opt):
 # SIMPLEX METHOD
 # ============================================================
 def simplex_iterations(c, A, b, max_iter=50):
-    """
-    Solves a maximization problem in standard form using the Simplex Method.
-    Assumes constraints are of the form Ax <= b and x >= 0.
-    """
     n_con, n_var = len(A), len(c)
     tableau = []
-
-    # --- 1. INITIALIZE TABLEAU ---
-    # Add slack variables to convert inequalities (<=) into equalities
     for i, row in enumerate(A):
         slack = [1.0 if j == i else 0.0 for j in range(n_con)]
         tableau.append(list(row) + slack + [b[i]])
-
-    # Objective function row: Z - c1x1 - c2x2 ... = 0
     obj = [-ci for ci in c] + [0.0] * n_con + [0.0]
     tableau.append(obj)
-
-    # Track which variables are currently in the basis (starting with slacks)
     basis = [f"s{i+1}" for i in range(n_con)]
     col_labels = ([f"x{i+1}" for i in range(n_var)] +
                   [f"s{i+1}" for i in range(n_con)] + ["RHS"])
-    
     tableau = np.array(tableau, dtype=float)
     records = []
 
-    # --- 2. ITERATION LOOP ---
     for iteration in range(max_iter):
-        # Identify the "Entering Variable" (most negative coefficient in objective row)
         obj_row = tableau[-1, :-1]
         pivot_col = int(np.argmin(obj_row))
-
-        # Optimality Check: If no negative coefficients, we've reached the maximum
         if obj_row[pivot_col] >= -1e-9:
             break
-
-        # --- 3. MINIMUM RATIO TEST ---
-        # Determine the "Leaving Variable" to maintain feasibility
         rhs = tableau[:-1, -1]
         col_val = tableau[:-1, pivot_col]
-        
-        # Avoid division by zero or negative values; only consider positive entries in pivot column
         ratios = np.where(col_val > 1e-9, rhs / col_val, np.inf)
         pivot_row = int(np.argmin(ratios))
-
-        # If all ratios are infinity, the problem is unbounded
         if ratios[pivot_row] == np.inf:
             break
-
-        # Log movement
         entering = col_labels[pivot_col]
         leaving = basis[pivot_row]
-
-        # --- 4. PIVOTING (GAUSS-JORDAN ELIMINATION) ---
-        # Normalize the pivot row so the pivot element becomes 1
         tableau[pivot_row] /= tableau[pivot_row, pivot_col]
-
-        # Eliminate the entering variable from all other rows
         for i in range(len(tableau)):
             if i != pivot_row:
                 tableau[i] -= tableau[i, pivot_col] * tableau[pivot_row]
-
-        # Update the basis with the entering variable
         basis[pivot_row] = entering
-
-        # Store a snapshot of the current state for visualization/reporting
         df = pd.DataFrame(
             tableau,
             columns=col_labels,
             index=[f"R{i+1}" for i in range(n_con)] + ["Z"]
         ).round(4)
-        
         records.append({
             "iteration": iteration + 1,
             "entering": entering,
@@ -444,91 +409,76 @@ def simplex_iterations(c, A, b, max_iter=50):
             "method": "Simplex"
         })
 
-    # --- 5. EXTRACT FINAL SOLUTION ---
     solution = [0.0] * n_var
     for i, bv in enumerate(basis):
-        # If a decision variable (x_i) is in the basis, its value is in the RHS column
         m = re.match(r'x(\d+)', bv)
         if m:
             xi = int(m.group(1)) - 1
             if xi < n_var:
                 solution[xi] = round(tableau[i, -1], 6)
-    
-    # Return all iteration steps, the final x values, and the max Z value
     return records, solution, round(tableau[-1, -1], 6)
 
 # ============================================================
 # BIG-M METHOD
 # ============================================================
 def bigm_iterations(c, A, b, ineq, opt, max_iter=80):
-    """
-    Solves Linear Programming problems with >= or = constraints 
-    by introducing Artificial Variables with a high cost penalty (M).
-    """
     n_vars, n_cons = len(c), len(A)
-    M = 1000000  # Large penalty value (BIG_M)
-    
-    # Standardize objective: Simplex logic usually minimizes the objective row
+    M = BIG_M
     sign = -1.0 if opt == "Maximize" else 1.0
     c_arr = [sign * ci for ci in c]
 
-    # --- 1. VARIABLE MAPPING ---
-    # Identify how many Slack, Surplus, and Artificial variables we need
     slack_map = {}
     artif_map = {}
-    k_s = 0  # Slack/Surplus counter
-    k_a = 0  # Artificial counter
-    
+    k_s = 0
+    k_a = 0
+    slack_types = []
+
     for i, iq in enumerate(ineq):
         if iq == "<=":
+            slack_types.append(("slack", i))
             k_s += 1
         elif iq == ">=":
+            slack_types.append(("surplus", i))
             k_s += 1
             k_a += 1
-        else: # iq == "="
+        else:
             k_a += 1
 
-    n_slack_actual = k_s
-    n_artif_actual = k_a
+    n_slack_actual = sum(1 for iq in ineq if iq in ("<=", ">="))
+    n_artif_actual = sum(1 for iq in ineq if iq in (">=", "="))
     total_cols = n_vars + n_slack_actual + n_artif_actual + 1
 
-    # Generate labels for DataFrame visualization
     col_labels = ([f"x{i+1}" for i in range(n_vars)] +
                   [f"s{i+1}" for i in range(n_slack_actual)] +
                   [f"a{i+1}" for i in range(n_artif_actual)] + ["RHS"])
 
-    # --- 2. TABLEAU CONSTRUCTION ---
     tableau = np.zeros((n_cons + 1, total_cols))
     k_s2 = 0
     k_a2 = 0
 
     for i, iq in enumerate(ineq):
-        tableau[i, :n_vars] = A[i] # Decision variable coefficients
-        tableau[i, -1] = b[i]      # Constraint constants (RHS)
-        
+        tableau[i, :n_vars] = A[i]
+        tableau[i, -1] = b[i]
         if iq == "<=":
             col = n_vars + k_s2
-            tableau[i, col] = 1.0  # Add Slack variable
+            tableau[i, col] = 1.0
             slack_map[i] = col
             k_s2 += 1
         elif iq == ">=":
             col_s = n_vars + k_s2
-            tableau[i, col_s] = -1.0 # Add Surplus variable
+            tableau[i, col_s] = -1.0
             slack_map[i] = col_s
             k_s2 += 1
-            
             col_a = n_vars + n_slack_actual + k_a2
-            tableau[i, col_a] = 1.0  # Add Artificial variable
+            tableau[i, col_a] = 1.0
             artif_map[i] = col_a
             k_a2 += 1
-        else: # iq == "="
+        else:
             col_a = n_vars + n_slack_actual + k_a2
-            tableau[i, col_a] = 1.0  # Add Artificial variable only
+            tableau[i, col_a] = 1.0
             artif_map[i] = col_a
             k_a2 += 1
 
-    # --- 3. INITIAL BASIS SELECTION ---
-    # Slacks (<=) or Artificials (>=, =) start in the basis
     basis = [None] * n_cons
     for i, iq in enumerate(ineq):
         if iq == "<=":
@@ -536,63 +486,53 @@ def bigm_iterations(c, A, b, ineq, opt, max_iter=80):
         else:
             basis[i] = col_labels[artif_map[i]]
 
-    # --- 4. OBJECTIVE ROW SETUP & PENALTY ---
-    # Set initial objective row with penalties (M) for artificial variables
     for j in range(n_vars):
         tableau[-1, j] = c_arr[j]
     for ac in artif_map.values():
         tableau[-1, ac] = M
 
-    # Row operations to make artificial variable columns "clean" (0 in the Z-row)
-    # This is crucial: Z-row coefficients for basic variables must be zero.
     for row_i, iq in enumerate(ineq):
         if iq in (">=", "="):
             ac = artif_map[row_i]
             tableau[-1] -= tableau[-1, ac] * tableau[row_i]
 
-    # --- 5. PIVOTING LOOP (Standard Simplex) ---
     records = []
     for iteration in range(max_iter):
         obj_row = tableau[-1, :-1]
-        pivot_col = int(np.argmin(obj_row)) # Entering variable
-        
-        if obj_row[pivot_col] >= -1e-9: # Optimality reached
+        pivot_col = int(np.argmin(obj_row))
+        if obj_row[pivot_col] >= -1e-9:
             break
-            
         rhs = tableau[:-1, -1]
         col_val = tableau[:-1, pivot_col]
         ratios = np.where(col_val > 1e-9, rhs / col_val, np.inf)
-        pivot_row = int(np.argmin(ratios)) # Leaving variable
-        
+        pivot_row = int(np.argmin(ratios))
         if ratios[pivot_row] == np.inf:
-            break # Problem is unbounded
-            
+            break
         entering = col_labels[pivot_col]
         leaving = basis[pivot_row]
-        
-        # Gauss-Jordan Elimination
         tableau[pivot_row] /= tableau[pivot_row, pivot_col]
         for i in range(len(tableau)):
             if i != pivot_row:
                 tableau[i] -= tableau[i, pivot_col] * tableau[pivot_row]
-        
         basis[pivot_row] = entering
-        
-        # Log this iteration
-        df = pd.DataFrame(tableau, columns=col_labels, 
-                          index=[f"R{i+1}" for i in range(n_cons)] + ["Z"]).round(4)
+        df = pd.DataFrame(
+            tableau,
+            columns=col_labels,
+            index=[f"R{i+1}" for i in range(n_cons)] + ["Z"]
+        ).round(4)
         records.append({
-            "iteration": iteration + 1, "entering": entering, "leaving": leaving,
-            "basis": list(basis), "tableau": df, "method": "Big-M"
+            "iteration": iteration + 1,
+            "entering": entering,
+            "leaving": leaving,
+            "basis": list(basis),
+            "tableau": df,
+            "method": "Big-M"
         })
 
-    # --- 6. FEASIBILITY & FINAL SOLUTION ---
-    # Check if any artificial variables are still positive in the final basis
     feasible = all(
         not (bv and bv.startswith('a') and abs(tableau[i, -1]) > 1e-6)
         for i, bv in enumerate(basis)
     )
-    
     solution = [0.0] * n_vars
     for i, bv in enumerate(basis):
         if bv:
@@ -601,106 +541,66 @@ def bigm_iterations(c, A, b, ineq, opt, max_iter=80):
                 xi = int(m.group(1)) - 1
                 if xi < n_vars:
                     solution[xi] = round(tableau[i, -1], 6)
-    
-    # Adjust objective value based on the initial optimization type
     raw_obj = round(tableau[-1, -1], 6)
     obj_val = -raw_obj if opt == "Maximize" else raw_obj
-    
     return records, solution, obj_val, feasible
 
 # ============================================================
 # SMART SOLVER
 # ============================================================
 def solve_primal(c, A, b, ineq, opt):
-    
-    # Step 1: Normalize constraints
-    # Converts all constraints into a standard form (e.g., makes RHS positive, etc.)
     A, b, ineq = normalize_constraints(A, b, ineq)
-    
-    # Step 2: Check if Big-M method is required
-    # Big-M is needed if there are >= or = constraints
     needs_bigm = any(iq in (">=", "=") for iq in ineq)
-    
-    # Step 3: If Big-M is needed, use Big-M method
     if needs_bigm:
         records, solution, obj_val, feasible = bigm_iterations(c, A, b, ineq, opt)
-        
-        # Return results along with method used ("Big-M")
         return records, solution, obj_val, "Big-M", feasible
-    
     else:
         try:
-            # Step 4: If only <= constraints, use Simplex method
-            # Convert A and b to list format to avoid mutation issues
             records, solution, obj_val = simplex_iterations(c, [list(r) for r in A], list(b))
-            
-            # Step 5: Adjust objective value for minimization
             if opt == "Maximize":
                 return records, solution, obj_val, "Simplex", True
             else:
-                # For minimization, negate the result
                 return records, solution, -obj_val, "Simplex", True
-        
         except Exception as e:
-            # Step 6: Handle errors (infeasible/unbounded cases)
             return [], [], 0.0, "Simplex", False
 
 # ============================================================
 # DUAL SOLVER
 # ============================================================
 def solve_dual(dc, dA, db, dineq, dtype, dual_var_bounds=None):
-    
-    # Step 1: Adjust objective function based on problem type
-    # If Minimization → keep as it is (+1)
-    # If Maximization → convert to minimization (-1)
     sign_d = 1 if dtype == "Minimize" else -1
     dc_arr = [sign_d * v for v in dc]
-    
-    # Step 2: Initialize lists for inequality and equality constraints
-    A_ub_d, b_ub_d = [], []   # For <= constraints
-    A_eq_d, b_eq_d = [], []   # For = constraints
-    
-    # Step 3: Handle dimension mismatch safely
-    # Ensures we don’t go out of bounds if inputs are inconsistent
+
+    A_ub_d, b_ub_d = [], []
+    A_eq_d, b_eq_d = [], []
+
     n_constraints = min(len(dA), len(dineq), len(db))
     if len(dA) != len(dineq) or len(dA) != len(db):
         st.warning("Dual dimension mismatch detected; using safe min-size to avoid crash.")
-    
-    # Step 4: Convert all constraints into standard form
+
     for i in range(n_constraints):
         row = dA[i]
-        
         if dineq[i] == "<=":
-            # Keep <= constraints as they are
             A_ub_d.append(row)
             b_ub_d.append(db[i])
-        
         elif dineq[i] == ">=":
-            # Convert >= to <= by multiplying by -1
             A_ub_d.append([-v for v in row])
             b_ub_d.append(-db[i])
-        
         else:
-            # Equality constraint (=)
             A_eq_d.append(row)
             b_eq_d.append(db[i])
-    
-    # Step 5: Set bounds for dual variables
-    # Default: all variables >= 0
+
     bounds = dual_var_bounds if dual_var_bounds is not None else [(0, None)] * len(dc)
-    
-    # Step 6: Solve using scipy linprog (HiGHS method)
+
     res = linprog(
         dc_arr,
-        A_ub=A_ub_d or None,   # Pass None if empty
+        A_ub=A_ub_d or None,
         b_ub=b_ub_d or None,
         A_eq=A_eq_d or None,
         b_eq=b_eq_d or None,
         bounds=bounds,
         method="highs"
     )
-    
-    # Step 7: Return result object (contains solution, status, etc.)
     return res
 
 # ============================================================
@@ -798,21 +698,12 @@ def generate_analysis(c, A, b, ineq, opt, primal_sol, primal_obj,
 # VISUALIZATION
 # ============================================================
 def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
-                 dual_sol, dual_obj, method_used):
-    """
-    Creates a dashboard of plots:
-    1. Bar chart of decision variables (Primal).
-    2. Pie chart of shadow prices (Dual distribution).
-    3. (If 2D) Geometric plot of constraints and the feasible region.
-    """
+                  dual_sol, dual_obj, method_used):
     n_vars = len(c)
-    # Style constants (Assumed defined elsewhere in your script)
-    bg_fig = SURFACE 
+    bg_fig = SURFACE
     tc = TEXT_MED
     cc = CHART_COLORS
 
-    # --- 1. FIGURE SETUP ---
-    # Create 3 subplots if it's a 2D problem (to show the geometry), else 2 subplots
     if n_vars == 2:
         fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     else:
@@ -825,30 +716,28 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
         for sp in ax.spines.values():
             sp.set_edgecolor(BORDER)
 
-    # --- 2. PRIMAL SOLUTION BAR CHART ---
     ax1 = axes[0]
     var_names = [f"x{i+1}" for i in range(n_vars)]
     bars = ax1.bar(var_names, primal_sol, color=cc[:n_vars],
-                    edgecolor='none', zorder=3, width=0.5, alpha=0.9)
-    
-    # Label each bar with its optimal value
+                   edgecolor='none', zorder=3, width=0.5, alpha=0.9)
     for bar, val in zip(bars, primal_sol):
         ax1.text(bar.get_x() + bar.get_width() / 2,
                  bar.get_height() + max(primal_sol) * 0.02 if max(primal_sol) > 0 else 0.1,
                  f'{val:.3f}', ha='center', va='bottom',
                  color=tc, fontsize=9, fontweight='bold')
-    
-    ax1.set_title("Primal Solution (x variables)", color=tc, fontsize=11, fontweight='bold', pad=12)
+    ax1.set_title("Primal Solution (x variables)", color=tc, fontsize=11,
+                  fontweight='bold', pad=12)
+    ax1.set_xlabel("Variable", color=tc, fontsize=9)
+    ax1.set_ylabel("Value", color=tc, fontsize=9)
     ax1.yaxis.grid(True, color=BORDER, linestyle='--', alpha=0.5, zorder=0)
+    ax1.set_axisbelow(True)
+    ax1.axhline(0, color=BORDER, linewidth=0.8)
 
-    # --- 3. DUAL VARIABLE DISTRIBUTION (PIE CHART) ---
-    # Dual variables (Shadow Prices) show how much the objective would change 
-    # if a constraint's RHS was increased by 1 unit.
     ax2 = axes[1]
     vals = np.array(dual_sol)
     if vals.sum() > 1e-9:
         wedges, texts, autotexts = ax2.pie(
-            np.abs(vals) + 1e-9, # Small epsilon to prevent zero-size wedges
+            np.abs(vals) + 1e-9,
             labels=[f"y{i+1}={v:.3f}" for i, v in enumerate(dual_sol)],
             colors=cc[:len(dual_sol)],
             autopct="%1.1f%%",
@@ -862,37 +751,36 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
     else:
         ax2.text(0.5, 0.5, "All dual\nvariables = 0",
                  ha='center', va='center', color=tc, fontsize=11)
-    ax2.set_title("Dual Variable Distribution (Shadow Prices)", color=tc, fontsize=11, fontweight='bold', pad=12)
+    ax2.set_title("Dual Variable Distribution (Shadow Prices)", color=tc,
+                  fontsize=11, fontweight='bold', pad=12)
 
-    # --- 4. 2D FEASIBLE REGION PLOT ---
     if n_vars == 2:
         ax3 = axes[2]
+        ax3.set_facecolor(bg_fig)
+        ax3.tick_params(colors=tc, labelsize=9)
+        for sp in ax3.spines.values():
+            sp.set_edgecolor(BORDER)
+
         max_b = max(b) if b else 10
-        x_max = max_b * 1.5 # Set axis limits based on RHS values
+        x_max = max_b * 1.5
         x = np.linspace(0, x_max, 400)
         constraint_colors = [ACCENT3, WARN, ACCENT2, ACCENT, "#FBBF24", "#FB923C"]
 
-        # Plot individual constraint lines
         for i, (row, rhs, sign) in enumerate(zip(A, b, ineq)):
             a1, a2 = row[0], row[1]
             col = constraint_colors[i % len(constraint_colors)]
             label = f"C{i+1}: {a1}x1 + {a2}x2 {sign} {rhs}"
-            
-            # Handle standard slope-intercept lines
             if abs(a2) > 1e-9:
                 y = (rhs - a1 * x) / a2
                 mask = (y >= -x_max * 0.1) & (y <= x_max * 1.5)
                 ax3.plot(x[mask], y[mask], color=col, linewidth=2, label=label, alpha=0.9)
-            # Handle vertical lines (where a2 is zero)
             elif abs(a1) > 1e-9:
                 xv = rhs / a1
                 ax3.axvline(xv, color=col, linewidth=2, label=label, alpha=0.9)
 
-        # --- 5. FEASIBLE REGION SHADING (CONVEX HULL) ---
         try:
             from scipy.spatial import ConvexHull
             pts = []
-            # Grid search to find all points (x,y) that satisfy ALL constraints
             test_x = np.linspace(0, x_max, 60)
             test_y = np.linspace(0, x_max, 60)
             for xi in test_x:
@@ -900,13 +788,14 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
                     ok = True
                     for i, (row, rhs, sign) in enumerate(zip(A, b, ineq)):
                         val = row[0]*xi + row[1]*yi
-                        if sign == "<=" and val > rhs + 1e-6: ok = False; break
-                        elif sign == ">=" and val < rhs - 1e-6: ok = False; break
-                        elif sign == "=" and abs(val - rhs) > 1e-4: ok = False; break
+                        if sign == "<=" and val > rhs + 1e-6:
+                            ok = False; break
+                        elif sign == ">=" and val < rhs - 1e-6:
+                            ok = False; break
+                        elif sign == "=" and abs(val - rhs) > 1e-4:
+                            ok = False; break
                     if ok:
                         pts.append(np.array([xi, yi]))
-            
-            # If we found feasible points, draw the shaded polygon (the Convex Hull)
             if len(pts) >= 3:
                 pts_arr = np.array(pts)
                 hull = ConvexHull(pts_arr)
@@ -915,14 +804,11 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
                                linewidth=1.5, linestyle='--', alpha=0.7)
                 ax3.add_patch(poly)
         except Exception:
-            pass # Skip shading if ConvexHull fails or scipy is missing
+            pass
 
-        # --- 6. PLOT OPTIMAL POINT ---
         ox, oy = primal_sol[0], primal_sol[1]
         ax3.scatter([ox], [oy], color=ACCENT, s=180, zorder=10,
                     edgecolors='white', linewidth=2, label=f"Optimal ({ox:.2f}, {oy:.2f})")
-        
-        # Annotate the optimal objective value (Z*)
         ax3.annotate(f"Z*={round(primal_obj,2)}",
                      xy=(ox, oy), xytext=(ox + x_max*0.05, oy + x_max*0.05),
                      color=ACCENT, fontsize=9, fontweight='bold',
@@ -930,11 +816,19 @@ def plot_results(c, A, b, ineq, opt, primal_sol, primal_obj,
 
         ax3.set_xlim(-x_max * 0.05, x_max)
         ax3.set_ylim(-x_max * 0.05, x_max)
-        ax3.set_title("Feasible Region & Optimal Point", color=tc, fontsize=11, fontweight='bold', pad=12)
-        ax3.legend(fontsize=7, framealpha=0.3, facecolor=SURFACE2, edgecolor=BORDER, loc='upper right')
+        ax3.set_xlabel("x1", color=tc, fontsize=10)
+        ax3.set_ylabel("x2", color=tc, fontsize=10)
+        ax3.set_title("Feasible Region & Optimal Point", color=tc,
+                      fontsize=11, fontweight='bold', pad=12)
+        ax3.legend(fontsize=7, framealpha=0.3, facecolor=SURFACE2,
+                   edgecolor=BORDER, labelcolor=tc, loc='upper right')
+        ax3.yaxis.grid(True, color=BORDER, linestyle='--', alpha=0.3)
+        ax3.xaxis.grid(True, color=BORDER, linestyle='--', alpha=0.3)
+        ax3.set_axisbelow(True)
 
     plt.tight_layout(pad=2.5)
     return fig
+
 # ============================================================
 # PDF BUILDER
 # ============================================================
@@ -1321,52 +1215,18 @@ st.markdown("</div>", unsafe_allow_html=True)
 # ============================================================
 # PROBLEM PREVIEW
 # ============================================================
-
-# Check if problem data exists in session state
 if "data" in st.session_state:
-    
-    # Step 1: Extract stored values
-    # c_p → objective coefficients
-    # A_p → constraint coefficients matrix
-    # b_p → RHS values
-    # ineq_p → inequality signs (<=, >=, =)
-    # opt_p → optimization type (Maximize/Minimize)
     c_p, A_p, b_p, ineq_p, opt_p = st.session_state.data
-    
-    # Step 2: Check if Big-M method is required
-    # Needed if any constraint is >= or =
     needs_bigm = any(iq in (">=", "=") for iq in ineq_p)
-    
-    # Step 3: Decide method label (Big-M or Simplex)
     ml = "Big-M Method" if needs_bigm else "Simplex Method"
-    
-    # Step 4: Choose tag color based on method
     tc_tag = ACCENT2 if needs_bigm else ACCENT3
-    
-    # Step 5: Display header with styling using HTML
     st.markdown(f"""<div style='display:flex;align-items:center;gap:8px;margin:14px 0 8px;'>
-    
-    <!-- Title -->
-    <span style='font-size:1.1rem;font-weight:700;color:{TEXT}!important;'>
-    Problem Preview
-    </span>
-    
-    <!-- Tag: Primal -->
+    <span style='font-size:1.1rem;font-weight:700;color:{TEXT}!important;'>Problem Preview</span>
     <span style='background:{TAG_BG};color:{TAG_TEXT}!important;padding:3px 10px;border-radius:999px;
-    font-size:0.72rem;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;'>
-    Primal
-    </span>
-    
-    <!-- Tag: Method (Big-M or Simplex) -->
+    font-size:0.72rem;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;'>Primal</span>
     <span style='background:{tc_tag}22;color:{tc_tag}!important;padding:3px 10px;border-radius:999px;
-    font-size:0.72rem;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;'>
-    {ml}
-    </span>
-    
+    font-size:0.72rem;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;'>{ml}</span>
     </div>""", unsafe_allow_html=True)
-    
-    # Step 6: Render and display the LP problem in formatted form
-    # (likely converts it into mathematical representation)
     st.markdown(render_lp_formula(c_p, A_p, b_p, ineq_p, opt_p), unsafe_allow_html=True)
 
 # ============================================================
